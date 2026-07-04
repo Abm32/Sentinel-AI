@@ -23,6 +23,14 @@ tagging and this module's `_latest_hypotheses` — hypotheses/tool_outputs
 are operator.add state channels, so this module resolves "latest" by
 round-tag filtering / de-duplication rather than assuming any fixed
 count.
+
+Source of truth for "is this root cause confirmed or unconfirmed": the
+top hypothesis's own `status` field (set by hypothesis.py, per the
+Hypothesis Agent's contract), NOT re-derived independently from
+confidence == 0.0. A hypothesis with unresolved blockers is required to
+carry status="unconfirmed" regardless of its confidence value — reading
+`status` directly keeps this module aligned with that contract instead
+of guessing at it from a side effect.
 """
 
 from __future__ import annotations
@@ -69,7 +77,7 @@ Your job: write a 2-3 sentence executive summary of the investigation for a clin
 
 Rules:
 - If the root cause status is "confirmed", state it plainly with its confidence level and what evidence corroborates it.
-- If the root cause status is "unconfirmed" (confidence 0.0, blocked by missing evidence), you MUST say the investigation cannot conclude yet and state what evidence is missing. Do NOT write a summary that implies more certainty than the data supports. Recommend the specific next step (e.g. genotype testing) if a blocker is present.
+- If the root cause status is "unconfirmed" (blocked by missing evidence), you MUST say the investigation cannot conclude yet and state what evidence is missing. Do NOT write a summary that implies more certainty than the data supports. Recommend the specific next step (e.g. genotype testing) if a blocker is present.
 - Be factual and concise. No hedging filler, no invented details not present in the hypothesis/evidence given to you."""
 
 
@@ -81,10 +89,12 @@ def _build_summary_context(top: dict | None, is_unconfirmed: bool) -> str:
         f"Confidence: {top['confidence']:.0%}",
         f"Status: {'unconfirmed' if is_unconfirmed else 'confirmed'}",
     ]
-    if top.get("evidence"):
-        lines.append(f"Supporting evidence: {'; '.join(top['evidence'])}")
-    if top.get("blocker"):
-        lines.append(f"Blocker: {top['blocker']}")
+    if top.get("supporting_evidence"):
+        lines.append(f"Supporting evidence: {'; '.join(top['supporting_evidence'])}")
+    if top.get("contradicting_evidence"):
+        lines.append(f"Contradicting evidence: {'; '.join(top['contradicting_evidence'])}")
+    if top.get("blockers"):
+        lines.append(f"Blockers: {'; '.join(top['blockers'])}")
     return "\n".join(lines)
 
 
@@ -124,7 +134,8 @@ def _executive_summary(state: InvestigationState, top: dict | None, is_unconfirm
     # Guardrail: if the root cause is unconfirmed, the LLM's summary text
     # must not claim confidence — reject and fall back if it does
     # something like state the diagnosis as fact.
-    if is_unconfirmed and "cannot" not in result.summary.lower() and "unconfirmed" not in result.summary.lower() and "unable" not in result.summary.lower():
+    lowered = result.summary.lower()
+    if is_unconfirmed and not any(w in lowered for w in ("cannot", "unconfirmed", "unable")):
         return fallback
 
     return result.summary
@@ -156,15 +167,12 @@ def reporter_node(state: InvestigationState) -> dict:
         citations.extend(output.get("citations", []))
 
     missing_evidence: list[str] = []
-    if top and top.get("blocker"):
-        missing_evidence.append(
-            f"{top['blocker'].split('—')[0].strip().capitalize()} — "
-            "genotype required to confirm"
-            if "genotype" in top["blocker"]
-            else top["blocker"]
-        )
+    if top:
+        missing_evidence.extend(top.get("blockers", []))
 
-    is_unconfirmed = top is not None and top["confidence"] == 0.0
+    # Source of truth: the top hypothesis's own status field, not a
+    # re-derivation from confidence. See module docstring.
+    is_unconfirmed = top is not None and top.get("status") == "unconfirmed"
 
     report = {
         "case_id": state["case_id"],
