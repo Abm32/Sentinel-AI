@@ -1,34 +1,46 @@
 """
 Vultr Serverless Inference client + prompt-based structured output.
 
+TWO-MODEL ARCHITECTURE. Sentinel Clinical uses two different model
+families on Vultr Serverless Inference, for two different jobs:
+
+  1. VultronRetriever (packages/tools/vultron_rerank_tool.py) — evidence
+     reranking, via `/v1/rerank`. Confirmed against Vultr's own docs to
+     be a visual document retrieval / reranking model family with NO
+     chat-completion capability — it cannot plan, reason, or generate
+     text. It is not used by this module.
+  2. A chat-completion model (this module) — the actual reasoning
+     engine behind every agent node that needs judgment: planner,
+     hypothesis, reporter, reviewer. This is a standard
+     `/v1/chat/completions` call against Vultr Serverless Inference,
+     same endpoint and API key as VultronRetriever, different model ID.
+
 Vultr's chat-completion docs state tool calling is currently supported
 ONLY on `kimi-k2-instruct`:
 https://docs.vultr.com/products/serverless/inference/management/usage/chat
 
 LangChain's `with_structured_output()` relies on function calling under
-the hood, so it cannot be trusted against Nemotron on this endpoint.
-Instead, every LLM node in this project uses `llm_json_call()`: a system
-prompt embedding the target JSON schema, a plain chat completion, then
-manual extraction + Pydantic validation, with one retry (schema
-feedback appended to the prompt) before falling back to None. This
-works against any OpenAI-compatible endpoint regardless of native
-function-calling support.
+the hood, so it cannot be trusted against the default chat model on this
+endpoint without confirming tool-calling support first. Instead, every
+LLM node in this project uses `llm_json_call()`: a system prompt
+embedding the target JSON schema, a plain chat completion, then manual
+extraction + Pydantic validation, with one retry (schema feedback
+appended to the prompt) before falling back to None. This works against
+any OpenAI-compatible endpoint regardless of native function-calling
+support — so it's correct regardless of which chat model is configured.
 
 MODEL ID — STILL UNVERIFIED AGAINST THE LIVE ENDPOINT.
-Two candidate strings have surfaced from different sources, and neither
-has been confirmed via a real `GET /v1/models` call:
-  - "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8" — found directly in
-    Vultr's own "Model Guides" docs, but in the context of self-hosting
-    via vLLM on a Vultr GPU instance (Inference Cookbook), not
-    confirmed as the managed Serverless Inference API's `model` string.
-  - "nvidia/nemotron-3-nano-omni" — the marketing/product name for
-    "Nemotron 3 Nano Omni" on Vultr Serverless Inference; the exact API
-    string was not independently confirmed against docs during this
-    session.
-Vultr's model naming has changed before. DO NOT treat either as ground
-truth. Run `list_models()` below with a real VULTR_API_KEY and correct
-VULTR_MODEL before relying on this for anything beyond local dry-runs
-with the rule-based fallback active.
+The default below (`moonshotai/kimi-k2-instruct`) is chosen because
+Vultr's own docs confirm it exists on Serverless Inference and supports
+tool calling (linked above), and Vultr's VultronRetriever guide's
+multimodal RAG example pairs VultronRetriever with `moonshotai/Kimi-K2.6`
+as a working chat model on the same endpoint. Neither the exact current
+model ID string nor its availability under your specific subscription
+has been confirmed via a live `GET /v1/models` call in this session.
+Vultr's model naming has changed before. DO NOT treat this as ground
+truth. Run `list_models()` below with a real VULTR_API_KEY and set
+VULTR_CHAT_MODEL to the confirmed ID before relying on this for anything
+beyond local dry-runs with the rule-based fallback active.
 """
 
 from __future__ import annotations
@@ -44,8 +56,8 @@ from pydantic import BaseModel, ValidationError
 
 VULTR_BASE_URL = "https://api.vultrinference.com/v1"
 
-# UNVERIFIED default — see module docstring. Override via VULTR_MODEL.
-_DEFAULT_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
+# UNVERIFIED default — see module docstring. Override via VULTR_CHAT_MODEL.
+_DEFAULT_CHAT_MODEL = "moonshotai/kimi-k2-instruct"
 
 
 def llm_available() -> bool:
@@ -56,7 +68,9 @@ def llm_available() -> bool:
 
 def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
     """
-    Build a ChatOpenAI client pointed at Vultr Serverless Inference.
+    Build a ChatOpenAI client pointed at Vultr Serverless Inference,
+    using the chat-completion reasoning model (NOT VultronRetriever —
+    see module docstring).
 
     Low temperature (0.3 default) is deliberate for clinical reasoning —
     determinism over creative variance.
@@ -70,7 +84,7 @@ def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
         )
 
     return ChatOpenAI(
-        model=os.getenv("VULTR_MODEL", _DEFAULT_MODEL),
+        model=os.getenv("VULTR_CHAT_MODEL", _DEFAULT_CHAT_MODEL),
         base_url=VULTR_BASE_URL,
         api_key=api_key,
         temperature=temperature,
@@ -87,9 +101,10 @@ def llm_json_call(
     """
     Call the LLM, extract JSON from its response, and parse it into
     `output_model`. No function calling — prompt-based structured output
-    only, since Vultr's tool-calling support is restricted to
-    kimi-k2-instruct and Nemotron is the model this project is committed
-    to using.
+    only, since tool-calling support on Vultr Serverless Inference is
+    restricted to specific models (kimi-k2-instruct, per Vultr's docs)
+    and this project doesn't want to depend on the configured chat
+    model supporting it.
 
     Returns None if all retries fail; callers MUST handle this by falling
     back to their rule-based implementation, not by propagating an
@@ -142,8 +157,11 @@ def list_models(api_key: str | None = None) -> list[dict]:
     """
     Hit the real Vultr Serverless Inference models endpoint and return
     the raw model list. Run this once with a real key to confirm the
-    exact Nemotron model ID string before trusting `_DEFAULT_MODEL` /
-    `VULTR_MODEL` for anything beyond local dry-runs.
+    exact chat-model ID string before trusting `_DEFAULT_CHAT_MODEL` /
+    `VULTR_CHAT_MODEL` for anything beyond local dry-runs, and to
+    confirm the VultronRetriever tier IDs
+    (packages/tools/vultron_rerank_tool.py) are available under your
+    subscription.
 
     Usage:
         python -m packages.llm
@@ -166,15 +184,32 @@ def list_models(api_key: str | None = None) -> list[dict]:
     return payload.get("data") or payload.get("models") or []
 
 
-def print_nemotron_models(models: list[dict]) -> None:
-    matches = [m for m in models if "nemotron" in str(m).lower()]
-    if not matches:
-        print("No Nemotron models found in the live catalog.")
-        return
-    print("Nemotron models found in the live Vultr Serverless Inference catalog:")
-    for m in matches:
+def print_model_catalog(models: list[dict]) -> None:
+    """Prints the chat-model candidates and VultronRetriever tiers found
+    in the live catalog, so a real deployment can pick a confirmed
+    VULTR_CHAT_MODEL and confirm the rerank tier IDs before relying on
+    either."""
+    vultron_matches = [m for m in models if "vultronretriever" in str(m).lower()]
+    kimi_matches = [m for m in models if "kimi" in str(m).lower()]
+
+    print("VultronRetriever tiers found in the live catalog:")
+    if vultron_matches:
+        for m in vultron_matches:
+            print(f"  - {m}")
+    else:
+        print("  (none found)")
+
+    print("kimi-k2 chat model candidates found in the live catalog:")
+    if kimi_matches:
+        for m in kimi_matches:
+            print(f"  - {m}")
+    else:
+        print("  (none found — pick another chat-capable model from the full list below)")
+
+    print("\nFull model list:")
+    for m in models:
         print(f"  - {m}")
 
 
 if __name__ == "__main__":
-    print_nemotron_models(list_models())
+    print_model_catalog(list_models())
