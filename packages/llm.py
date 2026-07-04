@@ -1,33 +1,57 @@
 """
-Vultr Serverless Inference client factory.
+Vultr Serverless Inference client + prompt-based structured output.
 
-Vultr Serverless Inference exposes an OpenAI-compatible API at
-https://api.vultrinference.com/v1, so `langchain_openai.ChatOpenAI` works
-directly against it with a custom `base_url`.
+Vultr's chat-completion docs state tool calling is currently supported
+ONLY on `kimi-k2-instruct`:
+https://docs.vultr.com/products/serverless/inference/management/usage/chat
 
-IMPORTANT — model ID is not yet verified against the live endpoint.
-Vultr's own docs are explicit that the API `model` string must be read
-from `GET /v1/models` with a real key — it does not necessarily match the
-marketing name or the self-hosted vLLM `--model` flag shown in their
-Inference Cookbook (that cookbook documents deploying on your own
-NVIDIA HGX B200 cluster, not the managed Serverless Inference product).
-The default below (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8`) is the
-best-evidenced candidate from Vultr's public docs as of this writing —
-run `list_models()` against a real `VULTR_API_KEY` and correct
-`VULTR_MODEL` before relying on this for anything beyond local dry-runs.
+LangChain's `with_structured_output()` relies on function calling under
+the hood, so it cannot be trusted against Nemotron on this endpoint.
+Instead, every LLM node in this project uses `llm_json_call()`: a system
+prompt embedding the target JSON schema, a plain chat completion, then
+manual extraction + Pydantic validation, with one retry (schema
+feedback appended to the prompt) before falling back to None. This
+works against any OpenAI-compatible endpoint regardless of native
+function-calling support.
+
+MODEL ID — STILL UNVERIFIED AGAINST THE LIVE ENDPOINT.
+Two candidate strings have surfaced from different sources, and neither
+has been confirmed via a real `GET /v1/models` call:
+  - "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8" — found directly in
+    Vultr's own "Model Guides" docs, but in the context of self-hosting
+    via vLLM on a Vultr GPU instance (Inference Cookbook), not
+    confirmed as the managed Serverless Inference API's `model` string.
+  - "nvidia/nemotron-3-nano-omni" — the marketing/product name for
+    "Nemotron 3 Nano Omni" on Vultr Serverless Inference; the exact API
+    string was not independently confirmed against docs during this
+    session.
+Vultr's model naming has changed before. DO NOT treat either as ground
+truth. Run `list_models()` below with a real VULTR_API_KEY and correct
+VULTR_MODEL before relying on this for anything beyond local dry-runs
+with the rule-based fallback active.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 
 import requests
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, ValidationError
 
 VULTR_BASE_URL = "https://api.vultrinference.com/v1"
 
-# Best-evidenced candidate, NOT yet confirmed live. See module docstring.
+# UNVERIFIED default — see module docstring. Override via VULTR_MODEL.
 _DEFAULT_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
+
+
+def llm_available() -> bool:
+    """True if a Vultr API key is configured. Agents use this to decide
+    between the LLM path and the deterministic rule-based fallback."""
+    return bool(os.getenv("VULTR_API_KEY"))
 
 
 def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
@@ -35,15 +59,14 @@ def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
     Build a ChatOpenAI client pointed at Vultr Serverless Inference.
 
     Low temperature (0.3 default) is deliberate for clinical reasoning —
-    we want determinism, not creative variance, in a system whose core
-    selling point is epistemic honesty over confident guessing.
+    determinism over creative variance.
     """
     api_key = os.getenv("VULTR_API_KEY")
     if not api_key:
         raise RuntimeError(
             "VULTR_API_KEY is not set. Callers should check "
             "`llm_available()` and fall back to the rule-based stub "
-            "instead of calling get_llm() directly."
+            "instead of calling get_llm() / llm_json_call() directly."
         )
 
     return ChatOpenAI(
@@ -55,22 +78,75 @@ def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
     )
 
 
-def llm_available() -> bool:
-    """True if a Vultr API key is configured. Agents use this to decide
-    between the LLM path and the deterministic rule-based fallback."""
-    return bool(os.getenv("VULTR_API_KEY"))
+def llm_json_call(
+    system_prompt: str,
+    user_prompt: str,
+    output_model: type[BaseModel],
+    retries: int = 2,
+) -> BaseModel | None:
+    """
+    Call the LLM, extract JSON from its response, and parse it into
+    `output_model`. No function calling — prompt-based structured output
+    only, since Vultr's tool-calling support is restricted to
+    kimi-k2-instruct and Nemotron is the model this project is committed
+    to using.
+
+    Returns None if all retries fail; callers MUST handle this by falling
+    back to their rule-based implementation, not by propagating an
+    exception into the graph.
+    """
+    llm = get_llm()
+
+    schema = output_model.model_json_schema()
+    full_system = f"""{system_prompt}
+
+You MUST respond with valid JSON only. No markdown, no code fences, no commentary.
+The JSON must conform to this schema:
+
+{json.dumps(schema, indent=2)}
+
+Return ONLY the JSON object."""
+
+    current_user_prompt = user_prompt
+
+    for attempt in range(retries + 1):
+        try:
+            response = llm.invoke(
+                [
+                    SystemMessage(content=full_system),
+                    HumanMessage(content=current_user_prompt),
+                ]
+            )
+            raw = response.content.strip()
+
+            # Strip markdown code fences if present (models sometimes
+            # add them despite being told not to).
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+
+            parsed = json.loads(raw)
+            return output_model.model_validate(parsed)
+        except (json.JSONDecodeError, ValidationError) as e:
+            if attempt < retries:
+                current_user_prompt = f"""{user_prompt}
+
+Your previous response failed to parse: {e}
+Please respond with valid JSON matching the schema."""
+            else:
+                return None
+
+    return None
 
 
 def list_models(api_key: str | None = None) -> list[dict]:
     """
-    Hit the real Vultr Serverless Inference models endpoint and return the
-    raw model list. Run this once with a real key to confirm the exact
-    Nemotron model ID string before trusting `_DEFAULT_MODEL` /
+    Hit the real Vultr Serverless Inference models endpoint and return
+    the raw model list. Run this once with a real key to confirm the
+    exact Nemotron model ID string before trusting `_DEFAULT_MODEL` /
     `VULTR_MODEL` for anything beyond local dry-runs.
 
     Usage:
-        python -c "from packages.llm import list_models, print_nemotron_models; \\
-                    print_nemotron_models(list_models())"
+        python -m packages.llm
     """
     key = api_key or os.getenv("VULTR_API_KEY")
     if not key:
@@ -83,8 +159,8 @@ def list_models(api_key: str | None = None) -> list[dict]:
     )
     response.raise_for_status()
     payload = response.json()
-    # Response shape isn't 100% pinned down without a live call — handle
-    # both a bare list and a {"data": [...]} / {"models": [...]} envelope.
+    # Response shape isn't pinned down without a live call — handle both
+    # a bare list and a {"data": [...]} / {"models": [...]} envelope.
     if isinstance(payload, list):
         return payload
     return payload.get("data") or payload.get("models") or []
