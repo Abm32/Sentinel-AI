@@ -1,25 +1,42 @@
 """
 Retrieval Agent node.
 
-Reads the Planner's task list and, for each retrieval-shaped task, calls
-`packages.tools.retrieval_tool.search_evidence()` to find relevant
-evidence chunks — writing them to `state["retrieved_evidence"]`.
+Reads the Planner's task list and, for each retrieval-shaped task,
+gathers candidate evidence chunks via
+`packages.tools.retrieval_tool.search_evidence()` (Azure AI Search, or
+the local keyword-overlap fallback), then reranks those candidates by
+relevance using VultronRetriever
+(`packages.tools.vultron_rerank_tool.rerank_evidence()`) before writing
+the top results to `state["retrieved_evidence"]`.
 
 Sits between the Planner and the Tool Agent in the graph:
 
     planner -> retrieval -> tool_agent -> hypothesis -> reporter -> reviewer
 
+Two-stage retrieval, two different jobs:
+  1. CANDIDATE GENERATION (`search_evidence`): cheap, broad lookup over
+     the evidence base — keyword/semantic match, casts a wide net.
+  2. RERANKING (`rerank_evidence`, VultronRetriever): the precision
+     pass. VultronRetriever reads each candidate with layout awareness
+     (in its designed use case, actual page images — tables, charts,
+     scans; here, extracted text) and re-scores relevance to the
+     specific investigation query, catching corroborating evidence a
+     keyword match alone would miss or misrank. This is VultronRetriever's
+     actual job per Vultr's own docs — it is a reranker, not a chat
+     model; see packages/tools/vultron_rerank_tool.py's module
+     docstring for the verified API shape.
+
 Division of labor with the Tool Agent (packages/agents/tool_agent.py):
   - Retrieval Agent owns *evidence search* tasks — anything answerable
-    by semantic/keyword lookup over the indexed evidence base (lab
-    trends, FDA label text, CPIC guideline text, drug-interaction
-    notes, medication history). These map onto `search_evidence()`
-    calls (Azure AI Search, or the local keyword-overlap fallback —
-    see packages/tools/retrieval_tool.py).
+    by search + rerank over the indexed evidence base (lab trends, FDA
+    label text, CPIC guideline text, drug-interaction notes, medication
+    history).
   - `retrieve_pharmacogenomics` stays a Tool Agent job: pgx-core is a
     deterministic clinical-decision engine, not a search index — you
     don't "search" for a CPIC recommendation, you compute it from a
-    resolved phenotype. The Retrieval Agent does NOT call pgx-core.
+    resolved phenotype. The Retrieval Agent does NOT call pgx-core, and
+    does NOT rerank pgx-core's output (nothing to rerank — it's a
+    single deterministic answer, not a set of candidate documents).
   - `build_timeline` is not yet implemented by either agent — it stays
     a `not_implemented` stub, produced by the Tool Agent as before.
 
@@ -33,17 +50,17 @@ node only ever *adds* general evidence chunks; it does not overwrite
 or filter what's already there, since `retrieved_evidence` is an
 `operator.add` reducer field.
 
-No LLM call in this node yet — it deterministically maps each task name
-to a search query and runs it. LLM-generated/refined queries (e.g.
-tailoring the query to the specific incident text rather than a fixed
-per-task-type string) can be added later without changing this node's
-contract with the rest of the graph.
+No chat-model call in this node — query construction is deterministic
+(task name -> fixed query string), same as before. Reranking is a
+VultronRetriever call, not a chat-completion call; the reasoning chat
+model (packages/llm.py) is not used here at all.
 """
 
 from __future__ import annotations
 
 from packages.schemas.investigation_state import InvestigationState
 from packages.tools.retrieval_tool import search_evidence
+from packages.tools.vultron_rerank_tool import rerank_evidence
 
 # Maps a Planner task name to the search query used to find corroborating
 # evidence for it. Deliberately excludes "retrieve_pharmacogenomics" (Tool
@@ -57,6 +74,14 @@ _TASK_TO_QUERY: dict[str, str] = {
     "retrieve_cpic_guidelines": "CPIC guideline DPYD fluoropyrimidine dose",
     "check_drug_interactions": "drug interaction fluorouracil",
 }
+
+# How many candidates search_evidence() pulls per task before reranking.
+# Wider than the final kept count so VultronRetriever has something
+# meaningful to rerank rather than just re-scoring a single result.
+_CANDIDATES_PER_TASK = 5
+
+# How many top-reranked results are kept per task after reranking.
+_KEEP_PER_TASK = 3
 
 
 def _already_retrieved(state: InvestigationState, doc_type: str) -> bool:
@@ -101,7 +126,13 @@ def retrieval_node(state: InvestigationState) -> dict:
         if doc_type and _already_retrieved(state, doc_type):
             continue
 
-        for result in search_evidence(query, top_k=3):
+        candidates = search_evidence(query, top_k=_CANDIDATES_PER_TASK)
+        if not candidates:
+            continue
+
+        reranked = rerank_evidence(query, candidates)
+
+        for result in reranked[:_KEEP_PER_TASK]:
             entry = dict(result)
             entry["retrieved_for_task"] = task_name
             retrieved.append(entry)
