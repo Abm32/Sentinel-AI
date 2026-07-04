@@ -19,7 +19,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from apps.api.routers import health, investigations
+from apps.api.routers import health, investigations, upload
 
 app = FastAPI(
     title="Sentinel Clinical API",
@@ -44,6 +44,7 @@ app.add_middleware(
 
 app.include_router(health.router, prefix="/api")
 app.include_router(investigations.router, prefix="/api")
+app.include_router(upload.router, prefix="/api")
 
 
 @app.get("/")
