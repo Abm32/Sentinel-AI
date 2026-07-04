@@ -16,3 +16,16 @@ langchain-openai==0.3.1
 # API layer (added incrementally as apps/api is built out)
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
+
+# Microsoft Azure — document/data layer (multi-cloud architecture:
+# Azure owns ingest/store/retrieve, NVIDIA/Vultr owns reasoning).
+# All three are optional at runtime — see packages/config.py's
+# *_available() checks and each tool's local fallback.
+azure-ai-documentintelligence==1.0.0b4
+azure-search-documents==11.5.2
+azure-cosmos==4.7.0
+
+# Local fallback for document extraction when Azure Document
+# Intelligence credentials are not configured.
+PyPDF2==3.0.1
+

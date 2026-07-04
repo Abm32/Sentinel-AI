@@ -19,6 +19,9 @@ __pycache__/
 pgdata/
 redis-data/
 
+# Local fallback storage for InvestigationState (Cosmos DB unavailable)
+data/investigations/
+
 # Node / frontend (added ahead of apps/web scaffolding)
 node_modules/
 .next/
