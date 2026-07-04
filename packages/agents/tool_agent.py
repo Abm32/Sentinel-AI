@@ -1,27 +1,31 @@
 """
 Tool Agent node — reads the Planner's task list and executes tools.
 
-Only `retrieve_pharmacogenomics` is wired to a real tool call (pgx-core)
-right now. Every other task in the plan is a deliberate no-op stub —
-`{"task": ..., "status": "not_implemented"}` — so the chain's shape is
-honest about what's real vs. plumbing-only.
+Two tools are wired for real (well, "real" relative to this project's
+current stage):
 
-The phenotype input for the pgx-core call is read from
-`state["retrieved_evidence"]` (a "genotype" evidence entry, if present)
-rather than hardcoded, so the same node can produce both investigation
-outcomes:
+  - retrieve_pharmacogenomics -> pgx-core (packages/tools/pgx_tool.py),
+    a genuine third-party call.
+  - retrieve_lab_trends -> a hardcoded stub returning fixed lab evidence
+    (neutropenia trend, normal eGFR). Not a real lab-retrieval backend —
+    exists to prove the Reviewer's reject -> re-investigate -> approve
+    loop without needing the Retrieval Agent built first.
 
-  Path A (confirmed):    a phenotype evidence entry is present  -> AVOID,
-                          76%-confidence DPYD hypothesis.
-  Path B (the refusal):  no phenotype evidence entry             -> pgx-core
-                          returns {} -> insufficient_evidence -> the
-                          Hypothesis Agent produces an explicit
-                          "UNCONFIRMED... need genotype" hypothesis
-                          instead of guessing.
+Every other planned task remains an explicit not_implemented stub.
 
-This mirrors how a real Retrieval Agent would surface (or fail to
-surface) a genomic report before the Tool Agent runs — Sentinel doesn't
-invent a phenotype; it reports honestly on what evidence was retrieved.
+Re-investigation behavior: this node runs once per pass through the
+graph, and the graph can route back into it after a Reviewer rejection
+(see packages/graph.py's conditional edge). Two things matter for that:
+
+  1. pgx-core is NOT re-called if a confirmed/insufficient-evidence result
+     already exists in tool_outputs from a prior pass — it's deterministic
+     given the same inputs, so re-running it would just duplicate the same
+     entry under the operator.add reducer.
+  2. retrieve_lab_trends only runs when the Reviewer has actually asked
+     for it (state["review_issues"] contains an issue with
+     action == "retrieve_labs") and it hasn't already been supplied —
+     otherwise every pass would silently start fabricating evidence that
+     wasn't requested.
 """
 
 from __future__ import annotations
@@ -33,6 +37,25 @@ from packages.tools.registry import call_tool
 # parsed documents; hardcoded here since Retrieval isn't built yet.
 _DEMO_GENE = "DPYD"
 _DEMO_DRUG = "fluorouracil"
+
+# Hardcoded lab-evidence stub, returned only when the Reviewer requests
+# `retrieve_labs`. Matches the demo narrative: neutropenia trend
+# corroborates the DPYD hypothesis; normal eGFR rules out the renal
+# alternative.
+_LAB_STUB_RESULT = {
+    "tool": "lab_trends",
+    "status": "confirmed",
+    "findings": [
+        {"test": "ANC", "trend": "declining", "day5_value": "0.4 x10^9/L", "flag": "neutropenia"},
+        {"test": "eGFR", "value": "92 mL/min/1.73m^2", "flag": "normal"},
+    ],
+    "interpretation": (
+        "Neutropenia trend (Day 5 ANC 0.4) corroborates cytotoxic marrow "
+        "suppression consistent with fluoropyrimidine toxicity. Normal "
+        "eGFR argues against renal impairment as the primary driver."
+    ),
+    "citations": [],
+}
 
 
 def _find_phenotype(state: InvestigationState) -> str | None:
@@ -48,6 +71,18 @@ def _find_phenotype(state: InvestigationState) -> str | None:
     return None
 
 
+def _already_ran(state: InvestigationState, tool_name: str) -> bool:
+    return any(o.get("tool") == tool_name for o in state.get("tool_outputs", []))
+
+
+def _labs_requested_and_missing(state: InvestigationState) -> bool:
+    requested = any(
+        issue.get("action") == "retrieve_labs"
+        for issue in state.get("review_issues", [])
+    )
+    return requested and not _already_ran(state, "lab_trends")
+
+
 def tool_agent_node(state: InvestigationState) -> dict:
     """
     LangGraph node. Returns only the fields that changed: `tool_outputs`
@@ -57,7 +92,7 @@ def tool_agent_node(state: InvestigationState) -> dict:
     task_names = {t["task"] for t in tasks}
     outputs: list[dict] = []
 
-    if "retrieve_pharmacogenomics" in task_names:
+    if "retrieve_pharmacogenomics" in task_names and not _already_ran(state, "pgx-core"):
         phenotype = _find_phenotype(state)
         result = call_tool(
             "pgx-core",
@@ -67,12 +102,17 @@ def tool_agent_node(state: InvestigationState) -> dict:
         )
         outputs.append(result)
 
-    # Every other planned task is a stub for now — no retrieval/tool
-    # backend exists yet. Recorded explicitly so the investigation state
-    # never silently implies work was done that wasn't.
-    for task in tasks:
-        if task["task"] == "retrieve_pharmacogenomics":
-            continue
-        outputs.append({"task": task["task"], "status": "not_implemented"})
+    if _labs_requested_and_missing(state):
+        outputs.append(dict(_LAB_STUB_RESULT))
+
+    # Every other planned task that hasn't been specifically handled above
+    # is a stub — no retrieval/tool backend exists yet. Recorded explicitly
+    # (and only on the first pass, to avoid duplicate not_implemented
+    # entries piling up under the operator.add reducer on every retry).
+    if not state.get("tool_outputs"):
+        for task in tasks:
+            if task["task"] in ("retrieve_pharmacogenomics", "retrieve_lab_trends"):
+                continue
+            outputs.append({"task": task["task"], "status": "not_implemented"})
 
     return {"tool_outputs": outputs}
