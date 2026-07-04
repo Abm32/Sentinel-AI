@@ -6,12 +6,14 @@ Output: an investigation task list, written to `state["tasks"]`.
 
 Two implementations, selected automatically:
 
-  - LLM path (Nemotron via Vultr Serverless Inference), used when
-    VULTR_API_KEY is set. Structured output via `llm_json_call`
-    (prompt-based JSON + manual Pydantic parsing) — NOT
-    `with_structured_output()`/function calling, since Vultr's tool
-    calling is restricted to kimi-k2-instruct and this project is
-    committed to Nemotron for the reasoning nodes. See packages/llm.py.
+  - LLM path (Vultr Serverless Inference chat-completion model — see
+    packages/llm.py's module docstring for the current default and its
+    unverified-model-ID caveat), used when VULTR_API_KEY is set.
+    Structured output via `llm_json_call` (prompt-based JSON + manual
+    Pydantic parsing) — NOT `with_structured_output()`/function
+    calling, since tool-calling support on Vultr Serverless Inference
+    is restricted to specific models and this project doesn't want to
+    depend on the configured chat model supporting it.
   - Rule-based fallback (deterministic), used when no key is set, or if
     the LLM call fails after retries. This keeps the graph runnable
     with no API key at all, and resilient if the API is flaky during a

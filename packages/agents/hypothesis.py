@@ -7,9 +7,9 @@ competing hypotheses with confidence scores, written to
 
 Two implementations, selected automatically (same pattern as planner.py):
 
-  - LLM path (Nemotron via Vultr Serverless Inference), used when
-    VULTR_API_KEY is set. Structured output via `llm_json_call`
-    (prompt-based JSON, no function calling).
+  - LLM path (Vultr Serverless Inference chat-completion model — see
+    packages/llm.py), used when VULTR_API_KEY is set. Structured output
+    via `llm_json_call` (prompt-based JSON, no function calling).
   - Rule-based fallback (deterministic), used when no key is set, or the
     LLM call fails after retries, OR the LLM violates the no-guessing
     guardrail (see below) — in which case we do not trust its output at
