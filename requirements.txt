@@ -1,0 +1,15 @@
+# Sentinel Clinical — backend dependencies
+# Pin exact versions. Do not use open ranges.
+
+# Pharmacogenomics evidence tool (Anukriti's deterministic pgx engine).
+# Consumed as a library dependency, one tool among many in the Tool Agent's
+# toolkit — Sentinel does NOT reimplement genotype/phenotype calling.
+anukriti-pgx-core==0.6.0
+
+# Agent orchestration
+langgraph==0.2.60
+pydantic==2.9.2
+
+# API layer (added incrementally as apps/api is built out)
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
