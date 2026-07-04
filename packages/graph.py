@@ -1,6 +1,7 @@
 """
-The investigation graph: START -> planner -> tool_agent -> hypothesis ->
-reporter -> reviewer -> (approved: END | rejected: back to tool_agent).
+The investigation graph: START -> planner -> retrieval -> tool_agent ->
+hypothesis -> reporter -> reviewer -> (approved: END | rejected: back to
+tool_agent).
 
 Run directly for a smoke test covering all three demo scenarios:
 
@@ -23,6 +24,16 @@ returns insufficient_evidence -> zero-confidence UNCONFIRMED hypothesis ->
 draft report says "cannot conclude without genotype" -> Reviewer APPROVES
 the refusal on the first pass (no retry needed) — approving honest
 uncertainty, not rejecting it.
+
+Retrieval Agent (packages/agents/retrieval.py) sits between planner and
+tool_agent: it runs the Planner's evidence-search tasks (lab trends, FDA
+label, CPIC guidelines, drug interactions, medication history) through
+`search_evidence()` and writes results to `retrieved_evidence`. It does
+NOT re-run on the reject -> reinvestigate loop back into tool_agent (see
+build_graph()'s edges below) — only tool_agent and downstream nodes
+re-run on that path, matching the existing re-investigation contract
+(pgx-core/lab_trends dedup logic in tool_agent.py, `_already_retrieved`
+dedup in retrieval.py guards it regardless if that ever changes).
 """
 
 from __future__ import annotations
@@ -34,6 +45,7 @@ from langgraph.graph import END, StateGraph
 from packages.agents.hypothesis import hypothesis_node
 from packages.agents.planner import planner_node
 from packages.agents.reporter import reporter_node
+from packages.agents.retrieval import retrieval_node
 from packages.agents.reviewer import reviewer_node
 from packages.agents.tool_agent import tool_agent_node
 from packages.schemas.investigation_state import InvestigationState, new_investigation
@@ -58,13 +70,15 @@ def review_router(state: InvestigationState) -> str:
 def build_graph():
     graph = StateGraph(InvestigationState)
     graph.add_node("planner", planner_node)
+    graph.add_node("retrieval", retrieval_node)
     graph.add_node("tool_agent", tool_agent_node)
     graph.add_node("hypothesis", hypothesis_node)
     graph.add_node("reporter", reporter_node)
     graph.add_node("reviewer", reviewer_node)
 
     graph.set_entry_point("planner")
-    graph.add_edge("planner", "tool_agent")
+    graph.add_edge("planner", "retrieval")
+    graph.add_edge("retrieval", "tool_agent")
     graph.add_edge("tool_agent", "hypothesis")
     graph.add_edge("hypothesis", "reporter")
     graph.add_edge("reporter", "reviewer")
