@@ -16,28 +16,39 @@ failure. See `docs/ARCHITECTURE.md` for how each agent enforces this.
 
 ## Architecture at a glance
 
-Multi-cloud by design, not by checkbox: **Microsoft Azure owns the data
-lifecycle (ingest → store → retrieve); NVIDIA Nemotron via Vultr
-Serverless Inference owns the reasoning** (planning, hypothesis
-generation, review).
+Two Vultr Serverless Inference models, each doing the job it's actually
+built for — plus Microsoft Azure as the secondary/optional data layer:
+
+- **VultronRetriever** (Flash/Core/Prime, Qwen3.5-based, #1 on ViDoRe V3)
+  — Sentinel's core evidence retrieval engine, via `/v1/rerank`. It
+  reads clinical evidence the way a clinician does, with full layout
+  awareness (tables, charts, scans), and reranks candidate evidence by
+  relevance to the investigation.
+- **A Vultr-hosted chat-completion model** — the reasoning engine behind
+  planning, hypothesis generation, report synthesis, and review.
+  VultronRetriever cannot do this job (it has no chat-completion
+  capability, confirmed against Vultr's own docs); this is a standard
+  `/v1/chat/completions` call on the same endpoint and API key.
 
 ```
-Document Upload → Azure AI Document Intelligence (OCR + extraction)
+Document Upload → Azure AI Document Intelligence (OCR + extraction, optional)
                         ↓
-                Azure AI Search (semantic evidence retrieval)
+                Candidate evidence chunks (Azure AI Search or local fallback)
                         ↓
-                Azure Cosmos DB (investigation state + evidence storage)
+                VultronRetriever rerank (/v1/rerank) ← layout-aware retrieval
+                        ↓
+                Azure Cosmos DB (investigation state + evidence storage, optional)
                         ↓
           LangGraph Investigation Engine (orchestration)
        planner → retrieval → tool_agent → hypothesis → reporter → reviewer
                         ↓
-      NVIDIA Nemotron via Vultr Serverless Inference (reasoning)
+      Vultr-hosted chat model (/v1/chat/completions) — reasoning
                         ↓
               anukriti-pgx-core (deterministic PGx tool)
 ```
 
-Every cloud dependency — Vultr/Nemotron and all three Azure services —
-is **optional at runtime**. Each one has a deterministic or local
+Every cloud dependency — both Vultr models and all three Azure services
+— is **optional at runtime**. Each one has a deterministic or local
 fallback, so the full investigation pipeline runs end-to-end with zero
 cloud credentials configured. See `docs/ARCHITECTURE.md` for the full
 breakdown of what each service does and what its fallback is.
@@ -48,16 +59,17 @@ breakdown of what each service does and what its fallback is.
 packages/
   agents/          Planner, Retrieval, Tool Agent, Hypothesis, Reporter, Reviewer
   tools/           pgx-core adapter, Document Intelligence adapter,
-                   AI Search / evidence-retrieval adapter, tool registry
+                   AI Search / evidence-candidate adapter,
+                   VultronRetriever rerank adapter, tool registry
   database/        Cosmos DB client (+ local JSON fallback)
   schemas/         InvestigationState (LangGraph state channel)
   graph.py         Builds and runs the LangGraph investigation graph
-  llm.py           Vultr Serverless Inference client (Nemotron)
-  config.py        Azure availability checks (azure_available(), etc.)
+  llm.py           Vultr Serverless Inference chat model (reasoning)
+  config.py        Vultr rerank + Azure availability checks
 apps/
   api/             FastAPI app: REST + WebSocket streaming
 docs/
-  ARCHITECTURE.md  Full multi-cloud architecture writeup
+  ARCHITECTURE.md  Full multi-cloud, two-model architecture writeup
 ```
 
 ## Setup
