@@ -1,19 +1,28 @@
 """
-The three-node investigation chain: START -> planner -> tool_agent ->
-hypothesis -> END.
+The investigation graph: START -> planner -> tool_agent -> hypothesis ->
+reporter -> reviewer -> (approved: END | rejected: back to tool_agent).
 
-Run directly for a smoke test covering both demo paths:
+Run directly for a smoke test covering all three demo scenarios:
 
-    python packages/graph.py
+    python -m packages.graph
 
-Path A (confirmed): retrieved_evidence contains a DPYD "Poor Metabolizer"
-genomic report -> pgx-core returns AVOID -> Hypothesis Agent emits the
-76%/17%/7% competing-hypothesis set.
+Scenario 1 (Path A, first pass): DPYD Poor Metabolizer phenotype
+available -> pgx-core AVOID -> 76% hypothesis -> draft report -> Reviewer
+REJECTS (confidence_inflated, single evidence source) -> loops back to
+tool_agent.
 
-Path B (the refusal — the actual demo moment): no genomic-phenotype
-evidence retrieved -> pgx-core returns {} (insufficient_evidence) ->
-Hypothesis Agent emits a single zero-confidence, explicitly-blocked
-hypothesis naming the missing evidence, instead of guessing.
+Scenario 2 (Path A, full loop): same as above, but the graph runs to
+completion — rejection triggers a second tool_agent pass that adds the
+lab_trends stub (because the Reviewer's issue requested it), hypothesis
+re-scores with the added evidence, Reporter regenerates, Reviewer
+APPROVES. This is the full demo arc: investigate -> report -> reject ->
+re-investigate -> approve -> finalize.
+
+Scenario 3 (Path B, the refusal): no phenotype evidence -> pgx-core
+returns insufficient_evidence -> zero-confidence UNCONFIRMED hypothesis ->
+draft report says "cannot conclude without genotype" -> Reviewer APPROVES
+the refusal on the first pass (no retry needed) — approving honest
+uncertainty, not rejecting it.
 """
 
 from __future__ import annotations
@@ -24,8 +33,26 @@ from langgraph.graph import END, StateGraph
 
 from packages.agents.hypothesis import hypothesis_node
 from packages.agents.planner import planner_node
+from packages.agents.reporter import reporter_node
+from packages.agents.reviewer import reviewer_node
 from packages.agents.tool_agent import tool_agent_node
 from packages.schemas.investigation_state import InvestigationState, new_investigation
+
+_MAX_RETRIES = 3
+
+
+def review_router(state: InvestigationState) -> str:
+    """Conditional edge out of the reviewer node."""
+    latest = state["review_history"][-1]
+    if latest["verdict"] == "approved":
+        return "end"
+    if state["retry_count"] >= _MAX_RETRIES:
+        # Safety cap — don't loop forever if evidence can never satisfy
+        # the Reviewer. Ends the graph with the last rejected state
+        # (report will be None; caller can inspect review_history to see
+        # why the investigation stalled).
+        return "end"
+    return "reinvestigate"
 
 
 def build_graph():
@@ -33,11 +60,23 @@ def build_graph():
     graph.add_node("planner", planner_node)
     graph.add_node("tool_agent", tool_agent_node)
     graph.add_node("hypothesis", hypothesis_node)
+    graph.add_node("reporter", reporter_node)
+    graph.add_node("reviewer", reviewer_node)
 
     graph.set_entry_point("planner")
     graph.add_edge("planner", "tool_agent")
     graph.add_edge("tool_agent", "hypothesis")
-    graph.add_edge("hypothesis", END)
+    graph.add_edge("hypothesis", "reporter")
+    graph.add_edge("reporter", "reviewer")
+
+    graph.add_conditional_edges(
+        "reviewer",
+        review_router,
+        {
+            "end": END,
+            "reinvestigate": "tool_agent",
+        },
+    )
 
     return graph.compile()
 
@@ -49,7 +88,8 @@ _INCIDENT_TEXT = (
 
 
 def run_path_a() -> InvestigationState:
-    """Confirmed path: a DPYD Poor Metabolizer genomic report is available."""
+    """Confirmed path, full loop: reject (thin evidence) -> re-investigate
+    -> approve -> finalize. This is Scenario 2, the full demo arc."""
     app = build_graph()
     state = new_investigation(case_id="demo-case-A", incident=_INCIDENT_TEXT)
     state["retrieved_evidence"] = [
@@ -63,27 +103,25 @@ def run_path_a() -> InvestigationState:
 
 
 def run_path_b() -> InvestigationState:
-    """Refusal path: no genomic-phenotype evidence was retrieved."""
+    """Refusal path: no genomic-phenotype evidence retrieved. Reviewer
+    approves the refusal on the first pass — no retry needed."""
     app = build_graph()
     state = new_investigation(case_id="demo-case-B", incident=_INCIDENT_TEXT)
-    # retrieved_evidence deliberately left empty — no genotype available.
     return app.invoke(state)
 
 
 def _print_result(label: str, result: InvestigationState) -> None:
     print(f"=== {label} ===")
-    print("tasks:")
-    for t in result["tasks"]:
-        print(f"  - {t}")
-    print("tool_outputs:")
-    for o in result["tool_outputs"]:
-        print(f"  - {json.dumps(o)}")
-    print("hypotheses:")
-    for h in result["hypotheses"]:
-        print(f"  - {json.dumps(h)}")
+    print(f"status: {result['status']}")
+    print(f"retry_count: {result['retry_count']}")
+    print("review_history:")
+    for r in result["review_history"]:
+        print(f"  - {json.dumps(r)}")
+    print("report:")
+    print(json.dumps(result["report"], indent=2))
     print()
 
 
 if __name__ == "__main__":
-    _print_result("Path A — confirmed (phenotype available)", run_path_a())
-    _print_result("Path B — refusal (no phenotype / the demo moment)", run_path_b())
+    _print_result("Path A — full loop: reject -> re-investigate -> approve", run_path_a())
+    _print_result("Path B — refusal, approved on first pass", run_path_b())
