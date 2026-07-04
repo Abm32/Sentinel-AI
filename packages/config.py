@@ -8,13 +8,23 @@ to a deterministic/local implementation if credentials are absent. The
 demo MUST work end-to-end with zero cloud credentials configured.
 
 This module centralizes the Azure-side checks (Document Intelligence,
-AI Search, Cosmos DB) so callers don't re-implement `os.getenv(...) and
-os.getenv(...)` boilerplate in three different tool files.
+AI Search, Cosmos DB) and the VultronRetriever rerank check, so callers
+don't re-implement `os.getenv(...) and os.getenv(...)` boilerplate in
+every tool file.
 """
 
 from __future__ import annotations
 
 import os
+
+
+def rerank_available() -> bool:
+    """True if a Vultr API key is configured for VultronRetriever
+    reranking (packages/tools/vultron_rerank_tool.py). Uses the same
+    VULTR_API_KEY as the chat-completion reasoning model
+    (packages/llm.py) — both are Vultr Serverless Inference, same key,
+    same endpoint, different model IDs."""
+    return bool(os.getenv("VULTR_API_KEY"))
 
 
 def doc_intel_available() -> bool:
