@@ -7,19 +7,22 @@ Output: an investigation task list, written to `state["tasks"]`.
 Two implementations, selected automatically:
 
   - LLM path (Nemotron via Vultr Serverless Inference), used when
-    VULTR_API_KEY is set. Structured output constrained to
-    InvestigationPlan so the result is always a real, typed task list.
-  - Rule-based fallback (deterministic), used otherwise. This keeps the
-    graph runnable with no API key at all — useful for tests, CI, and
-    demos without network access.
+    VULTR_API_KEY is set. Structured output via `llm_json_call`
+    (prompt-based JSON + manual Pydantic parsing) — NOT
+    `with_structured_output()`/function calling, since Vultr's tool
+    calling is restricted to kimi-k2-instruct and this project is
+    committed to Nemotron for the reasoning nodes. See packages/llm.py.
+  - Rule-based fallback (deterministic), used when no key is set, or if
+    the LLM call fails after retries. This keeps the graph runnable
+    with no API key at all, and resilient if the API is flaky during a
+    live demo — the deterministic path is a resilience feature, not a
+    lesser fallback.
 
 Downstream contract that MUST be preserved by both paths: `tool_agent.py`
 dispatches on the literal string in `task["task"]` (e.g.
 "retrieve_pharmacogenomics", "retrieve_lab_trends") to decide what to
 execute. The LLM prompt is deliberately constrained to the same fixed
-vocabulary the rule-based planner uses — an LLM that invents novel task
-names would silently produce not_implemented stubs for everything,
-since the Tool Agent doesn't know how to route them.
+vocabulary the rule-based planner uses.
 
 Planner never answers, never retrieves, never scores. It only plans.
 """
@@ -30,7 +33,7 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
-from packages.llm import get_llm, llm_available
+from packages.llm import llm_available, llm_json_call
 from packages.schemas.investigation_state import InvestigationState, InvestigationStatus
 
 # The fixed task vocabulary. Both the rule-based planner and the LLM
@@ -59,12 +62,7 @@ _DEFAULT_TASK_LIST: list[dict] = [
 
 
 class InvestigationTask(BaseModel):
-    task: str = Field(
-        description=(
-            "One of the following fixed task names — do not invent new "
-            f"ones: {', '.join(_TASK_VOCABULARY)}"
-        )
-    )
+    task: str = Field(description="What to investigate")
     priority: str = Field(description="high | medium | low")
     rationale: str = Field(description="Why this task matters for this case")
 
@@ -73,20 +71,15 @@ class InvestigationPlan(BaseModel):
     tasks: List[InvestigationTask]
 
 
-_PLANNER_PROMPT = """You are the Planner in a clinical adverse drug event investigation engine.
+_PLANNER_SYSTEM = """You are the Planner in a clinical adverse drug event investigation engine called Sentinel Clinical.
 
-Given a clinical incident, produce a structured investigation plan — a list of tasks
-the investigation must perform. Do NOT investigate. Do NOT diagnose. Only plan.
+Your job: given a clinical incident, produce a structured investigation plan — a list of specific tasks the investigation must perform.
 
-You MUST choose task names only from this fixed set (do not invent others):
-{task_vocabulary}
-
-Cover as many of medication history, lab trends, pharmacogenomics, FDA labeling,
-clinical guidelines (CPIC), drug interactions, and timeline reconstruction as are
-relevant to this incident.
-
-Incident: {incident}
-"""
+Rules:
+- Do NOT investigate. Do NOT diagnose. Do NOT draw conclusions. Only PLAN.
+- You MUST choose task names ONLY from this fixed set (do not invent others): {task_vocabulary}
+- Prioritize tasks: "high" for anything directly relevant to the suspected adverse event, "medium" for corroborating/contextual evidence.
+- Include a rationale for each task explaining why it matters for THIS case."""
 
 
 def _rule_based_planner(state: InvestigationState) -> dict:
@@ -97,19 +90,23 @@ def _rule_based_planner(state: InvestigationState) -> dict:
 
 
 def _llm_planner(state: InvestigationState) -> dict:
-    llm = get_llm().with_structured_output(InvestigationPlan)
-    prompt = _PLANNER_PROMPT.format(
-        task_vocabulary=", ".join(_TASK_VOCABULARY),
-        incident=state["incident"],
+    plan = llm_json_call(
+        system_prompt=_PLANNER_SYSTEM.format(
+            task_vocabulary=", ".join(_TASK_VOCABULARY)
+        ),
+        user_prompt=f"Incident: {state['incident']}",
+        output_model=InvestigationPlan,
     )
-    plan = llm.invoke(prompt)
+
+    if plan is None:
+        # LLM failed after retries — fall back to deterministic.
+        return _rule_based_planner(state)
 
     tasks = [t.model_dump() for t in plan.tasks]
     # Defensive: constrain to the known vocabulary even if the model
-    # drifts. Anything outside it would just become a silent
-    # not_implemented stub downstream, but better to filter here and fall
-    # back to the rule-based plan than to run an investigation with an
-    # empty/malformed task list.
+    # drifts. Anything outside it would become a silent not_implemented
+    # stub downstream, but better to filter here and fall back to the
+    # rule-based plan than run an investigation with a malformed task list.
     valid_tasks = [t for t in tasks if t["task"] in _TASK_VOCABULARY]
     if not valid_tasks:
         return _rule_based_planner(state)
