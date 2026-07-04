@@ -110,6 +110,40 @@ def run_path_b() -> InvestigationState:
     return app.invoke(state)
 
 
+def run_investigation(case_id: str, incident: str, documents: list | None = None):
+    """
+    Generator that runs the investigation graph and yields a state
+    snapshot after each node completes.
+
+    Used by the API layer (apps/api/routers/investigations.py) to drive
+    both the synchronous CRUD create path (consume the generator fully,
+    persist the final state) and the WebSocket streaming endpoint (yield
+    each snapshot to the client as it arrives, so the dashboard can show
+    agents working live).
+
+    Each yielded item is `(node_name, state_update)` — LangGraph's
+    `graph.stream()` event shape: a dict of `{node_name:
+    partial_state_update}` per step. We unpack it to a single tuple per
+    step since exactly one node runs per step in this graph (no parallel
+    branches).
+
+    Args:
+        case_id: Unique investigation identifier.
+        incident: Free-text clinical presentation.
+        documents: Optional pre-loaded documents (e.g. output of
+            `doc_intel_tool.extract_clinical_document`) to seed
+            `InvestigationState.documents` before the graph starts.
+    """
+    app = build_graph()
+    initial_state = new_investigation(case_id=case_id, incident=incident)
+    if documents:
+        initial_state["documents"] = documents
+
+    for event in app.stream(initial_state):
+        for node_name, state_update in event.items():
+            yield node_name, state_update
+
+
 def _print_result(label: str, result: InvestigationState) -> None:
     print(f"=== {label} ===")
     print(f"status: {result['status']}")
