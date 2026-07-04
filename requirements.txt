@@ -16,6 +16,7 @@ langchain-openai==0.3.1
 # API layer (added incrementally as apps/api is built out)
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
+python-multipart==0.0.18  # required by FastAPI for multipart/form-data file uploads
 
 # Microsoft Azure — document/data layer (multi-cloud architecture:
 # Azure owns ingest/store/retrieve, NVIDIA/Vultr owns reasoning).
