@@ -43,6 +43,7 @@ class InvestigationState(TypedDict):
     verified_facts: Annotated[list[dict], operator.add]
     contradictions: Annotated[list[dict], operator.add]
     review_history: Annotated[list[dict], operator.add]
+    review_issues: Annotated[list[dict], operator.add]  # reviewer -> tool_agent feedback
 
     retry_count: int
     confidence: Optional[float]
@@ -73,6 +74,7 @@ def new_investigation(case_id: str, incident: str) -> InvestigationState:
         verified_facts=[],
         contradictions=[],
         review_history=[],
+        review_issues=[],
         retry_count=0,
         confidence=None,
         report=None,
