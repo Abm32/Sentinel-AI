@@ -52,6 +52,7 @@ import re
 import requests
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from openai import APIConnectionError, APIError, APITimeoutError
 from pydantic import BaseModel, ValidationError
 
 VULTR_BASE_URL = "https://api.vultrinference.com/v1"
@@ -66,7 +67,7 @@ def llm_available() -> bool:
     return bool(os.getenv("VULTR_API_KEY"))
 
 
-def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
+def get_llm(temperature: float = 0.3, max_tokens: int = 16000) -> ChatOpenAI:
     """
     Build a ChatOpenAI client pointed at Vultr Serverless Inference,
     using the chat-completion reasoning model (NOT VultronRetriever —
@@ -74,6 +75,40 @@ def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
 
     Low temperature (0.3 default) is deliberate for clinical reasoning —
     determinism over creative variance.
+
+    WHY `max_tokens=16000`, NOT the previous 4096 — this is the actual
+    root cause of what first looked like a hang. `moonshotai/Kimi-K2.6`
+    is a reasoning ("thinking") model: it spends completion tokens on a
+    hidden chain-of-thought (surfaced as `message.reasoning` in the raw
+    API response) BEFORE emitting the actual answer in `message.content`.
+    Measured directly against this project's own Hypothesis Agent
+    prompt: at `max_tokens=4096` (the old default), the model was cut off
+    mid-`reasoning` at `finish_reason="length"` with `completion_tokens=
+    4096` and `content=None` — every single time, not intermittently. It
+    never once reached the JSON answer. Vultr's endpoint does NOT honor
+    the OpenAI-compatible `chat_template_kwargs: {"enable_thinking":
+    false}` override either (confirmed empirically — same token usage,
+    same `content=None`, matching a known open vLLM issue where Kimi's
+    reasoning parser ignores that flag). So the fix is not to suppress
+    reasoning, it's to give the model enough room to finish reasoning
+    AND write the answer: the same prompt completes in ~20s with
+    `finish_reason="stop"` and real JSON content once `max_tokens` is
+    raised to the 12000-16000 range (reasoning + JSON together measured
+    at ~4300 completion tokens; 16000 leaves comfortable headroom for
+    longer prompts/responses elsewhere in the graph, e.g. the Reviewer's
+    multi-issue rejections). This was being masked as "the LLM call
+    hangs" because `llm_json_call`'s retry loop would silently retry the
+    same doomed request against the same too-small budget every time.
+
+    `timeout=30` was the first fix attempted for the apparent hang and
+    is still useful as a genuine network-level safety net (a truly
+    stuck connection, not a slow-but-progressing one), but it was NOT
+    sufficient on its own — a request that takes ~20-25s to actually
+    complete at the correct `max_tokens` value would have kept getting
+    cut off and retried at 30s if the completion took slightly longer
+    under load, so the timeout is widened to 60s here to give a
+    real-but-slow response room to land instead of being killed and
+    retried right as it was about to finish.
     """
     api_key = os.getenv("VULTR_API_KEY")
     if not api_key:
@@ -89,6 +124,8 @@ def get_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
         api_key=api_key,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=60,
+        max_retries=1,
     )
 
 
@@ -132,6 +169,26 @@ Return ONLY the JSON object."""
                     HumanMessage(content=current_user_prompt),
                 ]
             )
+            # Defense in depth against the exact failure mode get_llm()'s
+            # docstring describes: a reasoning model (Kimi-K2.6) that
+            # spends its entire token budget on hidden chain-of-thought
+            # and never emits an answer returns `content=None` (not an
+            # empty string) with `finish_reason="length"`. The real fix
+            # is get_llm()'s max_tokens headroom, but `None.strip()`
+            # would raise AttributeError here — an exception this
+            # function's own docstring promises callers never have to
+            # handle — if that budget is ever exhausted anyway (a longer
+            # prompt than anticipated, a particularly verbose reasoning
+            # pass, etc). Treat it exactly like a parse failure: retry,
+            # then fall back to None.
+            if response.content is None:
+                if attempt < retries:
+                    current_user_prompt = f"""{user_prompt}
+
+Your previous response was truncated before producing an answer. Please respond with valid JSON matching the schema, more concisely."""
+                    continue
+                return None
+
             raw = response.content.strip()
 
             # Strip markdown code fences if present (models sometimes
@@ -148,6 +205,25 @@ Return ONLY the JSON object."""
 Your previous response failed to parse: {e}
 Please respond with valid JSON matching the schema."""
             else:
+                return None
+        except (APITimeoutError, APIConnectionError, APIError) as e:
+            # Network-level failure (the 30s timeout on get_llm() firing,
+            # a connection error, or a non-2xx from Vultr) is a DIFFERENT
+            # failure mode from a malformed JSON response, and was
+            # previously NOT caught here — it propagated straight out of
+            # llm_json_call and crashed the calling agent node, taking
+            # the whole graph run down with it (observed in practice:
+            # hypothesis_node's call timed out and killed
+            # `python -m packages.graph` with an unhandled
+            # openai.APITimeoutError, exactly the "propagating an
+            # exception into the graph" this function's own docstring
+            # says callers must never have to deal with). Treat it the
+            # same as a parse failure: retry with the same prompt (no
+            # schema-feedback rewrite needed, nothing was wrong with the
+            # prompt), then return None so every caller's existing
+            # `if result is None: fall back to rule-based` path handles
+            # it exactly like any other LLM failure.
+            if attempt >= retries:
                 return None
 
     return None
