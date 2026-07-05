@@ -15,6 +15,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Sentinel Clinical — Investigation Dashboard",
   description: "Autonomous AI investigation engine for adverse drug events.",
+  icons: {
+    icon: [{ url: "/sentinel_logo.png", type: "image/png" }],
+    apple: [{ url: "/sentinel_logo.png", type: "image/png" }],
+  },
 };
 
 export default function RootLayout({

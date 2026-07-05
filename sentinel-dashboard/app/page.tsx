@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import Image from "next/image";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, ArrowRight, ShieldAlert, Sparkles } from "lucide-react";
+import { ArrowRight, ShieldAlert, Sparkles } from "lucide-react";
 import { AgentStatusPanel } from "@/components/AgentStatusPanel";
 import { HypothesesPanel } from "@/components/HypothesesPanel";
 import { EvidencePanel } from "@/components/EvidencePanel";
@@ -199,9 +200,16 @@ export default function Dashboard() {
               initial={{ scale: 0.8, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               transition={{ type: "spring", stiffness: 200, damping: 15 }}
-              className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500/20 to-violet-500/20 border border-white/10 flex items-center justify-center shrink-0"
+              className="w-10 h-10 rounded-xl overflow-hidden border border-white/10 shrink-0 shadow-[0_0_20px_-4px_rgba(0,229,255,0.35)]"
             >
-              <Activity size={18} className="text-sky-300" />
+              <Image
+                src="/sentinel_logo.png"
+                alt="Sentinel Clinical logo"
+                width={40}
+                height={40}
+                className="w-full h-full object-cover"
+                priority
+              />
             </motion.div>
             <div>
               <h1 className="text-2xl md:text-3xl font-bold tracking-tight gradient-text font-mono">
