@@ -167,6 +167,38 @@ justification, and treat this split as an open design question against
 any hackathon rule that requires VultronRetriever to drive the core
 reasoning loop rather than one retrieval step within it.
 
+## RAISE Summit Hackathon — Vultr Track
+
+Sentinel Clinical is a submission to the **Agentic Intelligence with the
+VultronRetriever** track (Vultr / Cerebral Valley, RAISE Summit). This
+section maps the track's specific requirements to where each one is
+satisfied in this repo — and states plainly where it is not, rather than
+asserting compliance the code doesn't back up.
+
+| Requirement | Status | Where |
+|---|---|---|
+| GitHub repo with setup steps + docs | ✅ | This README, `docs/ARCHITECTURE.md` |
+| VultronRetriever used for document retrieval | ✅ | Retrieval Agent, see below |
+| VultronRetriever via Vultr Serverless Inference for **all core LLM reasoning steps** | ❌ **Not met as written.** See "Known open item" above and `docs/ARCHITECTURE.md`'s "Why not VultronRetriever for reasoning" — VultronRetriever has no chat-completion capability (confirmed against Vultr's own docs: it is exposed only via `POST /v1/rerank`, no `/v1/chat/completions`, no `/v1/embeddings`). Planning, hypothesis generation, report synthesis, and review run on a separate Vultr-hosted chat model (Kimi-K2.6) instead. | `packages/llm.py`, `packages/agents/*.py` |
+| Multi-step agentic workflow (plans, retrieves more than once, calls tools, decides) | ✅ | Investigation graph above: `planner → retrieval → tool_agent → hypothesis → reporter → reviewer`, with a genuine reject → re-investigate → approve loop, not a single retrieve-then-answer call |
+| Backend deployed on Vultr (VM or Vultr services) | ✅ | Vultr Cloud Compute VM, `apps/api` running via `uvicorn` |
+| Public demo URL | ✅ | See below |
+| Recorded demo video | ⬜ | Not yet recorded |
+| Clear explanation of architecture, agent workflow, use case | ✅ | This README's "Use case" and "Investigation graph" sections, `docs/ARCHITECTURE.md` |
+
+**VultronRetriever integration, specifically:** `packages/tools/vultron_rerank_tool.py::rerank_evidence()` calls Vultr Serverless Inference's `POST /v1/rerank` endpoint, defaulting to `vultr/VultronRetrieverFlash-Qwen3.5-0.8B` (configurable via `VULTR_RERANK_MODEL` to `vultr/VultronRetrieverCore-Qwen3.5-4.5B` or `vultr/VultronRetrieverPrime-Qwen3.5-8B` for denser documents). The Retrieval Agent (`packages/agents/retrieval.py`) calls it once per Planner task, reranking candidate evidence (CPIC guidelines, FDA label text, lab trends, drug interaction checks) against the investigation's specific query before that evidence reaches the Hypothesis Agent — a real precision pass, not a pass-through, and every reranked result is tagged with which model scored it (`reranked_by`) so this is inspectable in the API response, not just claimed in docs.
+
+**Public demo:**
+- Dashboard: `http://139.84.159.170:3000`
+- API: `http://139.84.159.170:8000` (`GET /api/health` reports live backend status)
+
+**Vultr credits:** this project used the $200 hackathon credit grant per
+the [Vultr Account Setup Guide](https://www.vultr.com/) for both
+Serverless Inference (VultronRetriever + chat model) and the Cloud
+Compute VM the backend runs on. No Vultr GPU instances are used —
+per the track's own note, GPU compute is not available for this event;
+all LLM workloads run through Vultr Serverless Inference.
+
 ## Project layout
 
 ```
