@@ -49,6 +49,7 @@ import json
 import os
 import re
 
+import httpx
 import requests
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -59,6 +60,15 @@ VULTR_BASE_URL = "https://api.vultrinference.com/v1"
 
 # UNVERIFIED default — see module docstring. Override via VULTR_CHAT_MODEL.
 _DEFAULT_CHAT_MODEL = "moonshotai/kimi-k2-instruct"
+
+# Process-wide cached client — see get_llm()'s docstring for why this
+# isn't rebuilt on every call. Deliberately module-level, not a
+# functools.lru_cache: get_llm() takes temperature/max_tokens args, but
+# every real call site uses the defaults, so a plain "build once" cache
+# is simpler and avoids a subtle bug where lru_cache would build a
+# SEPARATE client (and separate httpx connection pool) per distinct
+# argument combination rather than one truly shared pool.
+_llm_client: ChatOpenAI | None = None
 
 
 def llm_available() -> bool:
@@ -109,7 +119,35 @@ def get_llm(temperature: float = 0.3, max_tokens: int = 16000) -> ChatOpenAI:
     under load, so the timeout is widened to 60s here to give a
     real-but-slow response room to land instead of being killed and
     retried right as it was about to finish.
+
+    Separately: `llm_json_call()` previously called this function fresh
+    on every single invocation, and every LLM-backed agent node
+    (planner, hypothesis, reporter, reviewer) calls `llm_json_call()`
+    independently — so a single multi-pass investigation (reject ->
+    re-investigate can run up to `_MAX_RETRIES` times) created and never
+    closed up to ~16 separate `ChatOpenAI`/httpx client instances.
+    Observed directly on the deployed Vultr VM: `ss -tnp` showed 10
+    connections to Vultr's inference endpoint stuck in CLOSE-WAIT (the
+    remote side closed, our side never called `close()`) while the
+    FastAPI worker sat idle in `epoll_pwait` with zero events and its
+    thread pool blocked on `futex` waits — a genuinely dead background
+    task, not a slow one, on an investigation that had made real
+    progress (one reject/retry cycle already completed) before going
+    silent. A single float `timeout=` also collapses connect/read/write/
+    pool timeouts into one value via the OpenAI SDK's httpx wrapper,
+    which is coarser than intended; explicit `httpx.Timeout` below
+    separates "can't establish a connection" (10s — should be near-
+    instant or clearly broken) from "connected but no response body yet"
+    (60s — the actual slow-reasoning-model case this function's docstring
+    describes above). `get_llm()` is now memoized (one client per
+    process, reused across every node and every retry pass) so
+    connections are pooled and reused by httpx's own keep-alive logic
+    instead of a fresh, never-closed client being created per call.
     """
+    global _llm_client
+    if _llm_client is not None:
+        return _llm_client
+
     api_key = os.getenv("VULTR_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -118,15 +156,16 @@ def get_llm(temperature: float = 0.3, max_tokens: int = 16000) -> ChatOpenAI:
             "instead of calling get_llm() / llm_json_call() directly."
         )
 
-    return ChatOpenAI(
+    _llm_client = ChatOpenAI(
         model=os.getenv("VULTR_CHAT_MODEL", _DEFAULT_CHAT_MODEL),
         base_url=VULTR_BASE_URL,
         api_key=api_key,
         temperature=temperature,
         max_tokens=max_tokens,
-        timeout=60,
+        timeout=httpx.Timeout(60.0, connect=10.0),
         max_retries=1,
     )
+    return _llm_client
 
 
 def llm_json_call(
