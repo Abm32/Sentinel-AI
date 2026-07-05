@@ -3,6 +3,7 @@
 > 🏆 **RAISE Summit Hackathon — Vultr Track submission.** Public demo:
 > [`http://139.84.159.170:3000`](http://139.84.159.170:3000) ·
 > [1-minute demo video](https://www.youtube.com/watch?v=88gJxBA-HvU) ·
+> [Detailed video walkthrough (architecture, agents, use case)](docs/media/sentinel-clinical-detailed-demo.mp4) ·
 > [Jump to the track compliance table ↓](#raise-summit-hackathon--vultr-track)
 
 Sentinel Clinical is an autonomous adverse drug event investigation
@@ -355,7 +356,7 @@ asserting compliance the code doesn't back up.
 | Multi-step agentic workflow (plans, retrieves more than once, calls tools, decides) | ✅ | Investigation graph: `planner → retrieval → tool_agent → hypothesis → retrieval_2 → hypothesis → reporter → reviewer`, with a genuine reject → re-investigate → approve loop and a hypothesis-driven second VultronRetriever pass — not a single retrieve-then-answer call |
 | Backend deployed on Vultr (VM or Vultr services) | ✅ | Vultr Cloud Compute VM, `apps/api` running via `uvicorn` |
 | Public demo URL | ✅ | See below |
-| Recorded demo video | ✅ | [YouTube — 1 min demo](https://www.youtube.com/watch?v=88gJxBA-HvU) |
+| Recorded demo video | ✅ | [YouTube — 1 min demo](https://www.youtube.com/watch?v=88gJxBA-HvU) · [Detailed video walkthrough](docs/media/sentinel-clinical-detailed-demo.mp4) |
 | Clear explanation of architecture, agent workflow, use case | ✅ | This README's "Use case" and "Investigation graph" sections, `docs/ARCHITECTURE.md` |
 
 **VultronRetriever integration, specifically:**
@@ -389,6 +390,7 @@ in the API response, not just claimed in docs.
 - Dashboard: `http://139.84.159.170:3000`
 - API: `http://139.84.159.170:8000` (`GET /api/health` reports live backend status)
 - Demo video: [YouTube — 1 min](https://www.youtube.com/watch?v=88gJxBA-HvU)
+- Detailed video walkthrough (architecture, agents, use case): [`docs/media/sentinel-clinical-detailed-demo.mp4`](docs/media/sentinel-clinical-detailed-demo.mp4)
 
 **Vultr credits:** this project used the $200 hackathon credit grant per
 the [Vultr Account Setup Guide](https://www.vultr.com/) for both
