@@ -126,3 +126,15 @@ See `.env.example` for the full list. Every credential is optional —
 copy the file to `.env` and fill in only the services you want to run
 against real cloud backends; leave the rest blank to use the
 deterministic/local fallback for that subsystem.
+
+## Microsoft Azure Integration
+
+Sentinel Clinical uses three Azure AI services as part of its multi-cloud architecture:
+
+- **Azure AI Document Intelligence** — Extracts structured content (text, tables, layout) from uploaded clinical documents (lab reports, EHR notes, FDA labels). Powered by the `prebuilt-layout` model.
+
+- **Azure AI Search** — Provides semantic search over the evidence index, generating candidate evidence chunks that are then reranked by VultronRetriever.
+
+- **Azure Cosmos DB** — Stores investigation state, evidence, hypotheses, and finalized reports as JSON documents with serverless scaling.
+
+All Azure services are optional — the application includes deterministic local fallbacks for each. Azure services enhance the document processing pipeline while Vultr Serverless Inference handles all LLM workloads.
