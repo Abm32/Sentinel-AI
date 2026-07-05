@@ -48,6 +48,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 import httpx
 import requests
@@ -173,6 +175,7 @@ def llm_json_call(
     user_prompt: str,
     output_model: type[BaseModel],
     retries: int = 2,
+    hard_timeout: float = 90.0,
 ) -> BaseModel | None:
     """
     Call the LLM, extract JSON from its response, and parse it into
@@ -181,6 +184,29 @@ def llm_json_call(
     restricted to specific models (kimi-k2-instruct, per Vultr's docs)
     and this project doesn't want to depend on the configured chat
     model supporting it.
+
+    `hard_timeout` is a second, independent timeout layered on top of
+    get_llm()'s own `httpx.Timeout` — deliberately redundant, not
+    decorative duplication. Observed directly on the deployed Vultr VM,
+    twice, after two different attempts at fixing this purely via
+    client-level timeout config: a request can go silent — no response,
+    no exception, no timeout firing — in a way that `ChatOpenAI(timeout=
+    httpx.Timeout(60.0, connect=10.0))` did not catch. FastAPI's event
+    loop sat idling in `epoll_pwait` with zero events while a
+    `CLOSE-WAIT` connection to Vultr's endpoint lingered, meaning the
+    hang can happen at a layer between the SDK's own retry/timeout logic
+    and the OS socket that a client-library `timeout=` parameter does
+    not reliably reach on this network path. Rather than keep tuning
+    library-level timeout plumbing across the SDK/langchain/httpx stack
+    a third time, this wraps the call in an unconditional wall-clock
+    deadline using a plain thread + `Future`, which cannot be defeated
+    by any behavior inside `llm.invoke()` — if the thread hasn't
+    returned by `hard_timeout` seconds, this function gives up and
+    proceeds to retry/fallback exactly as if the SDK had raised a
+    timeout itself. The abandoned thread is left to finish or die on
+    its own (the underlying socket will eventually error out or get
+    reaped by the OS); it is not force-killed, since Python cannot safely
+    kill a thread, but it also cannot block the graph from continuing.
 
     Returns None if all retries fail; callers MUST handle this by falling
     back to their rule-based implementation, not by propagating an
@@ -202,12 +228,15 @@ Return ONLY the JSON object."""
 
     for attempt in range(retries + 1):
         try:
-            response = llm.invoke(
-                [
-                    SystemMessage(content=full_system),
-                    HumanMessage(content=current_user_prompt),
-                ]
-            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    llm.invoke,
+                    [
+                        SystemMessage(content=full_system),
+                        HumanMessage(content=current_user_prompt),
+                    ],
+                )
+                response = future.result(timeout=hard_timeout)
             # Defense in depth against the exact failure mode get_llm()'s
             # docstring describes: a reasoning model (Kimi-K2.6) that
             # spends its entire token budget on hidden chain-of-thought
@@ -246,13 +275,13 @@ Please respond with valid JSON matching the schema."""
             else:
                 return None
         except (APITimeoutError, APIConnectionError, APIError) as e:
-            # Network-level failure (the 30s timeout on get_llm() firing,
-            # a connection error, or a non-2xx from Vultr) is a DIFFERENT
-            # failure mode from a malformed JSON response, and was
-            # previously NOT caught here — it propagated straight out of
-            # llm_json_call and crashed the calling agent node, taking
-            # the whole graph run down with it (observed in practice:
-            # hypothesis_node's call timed out and killed
+            # Network-level failure (the SDK-level timeout on get_llm()
+            # firing, a connection error, or a non-2xx from Vultr) is a
+            # DIFFERENT failure mode from a malformed JSON response, and
+            # was previously NOT caught here — it propagated straight
+            # out of llm_json_call and crashed the calling agent node,
+            # taking the whole graph run down with it (observed in
+            # practice: hypothesis_node's call timed out and killed
             # `python -m packages.graph` with an unhandled
             # openai.APITimeoutError, exactly the "propagating an
             # exception into the graph" this function's own docstring
@@ -262,6 +291,14 @@ Please respond with valid JSON matching the schema."""
             # prompt), then return None so every caller's existing
             # `if result is None: fall back to rule-based` path handles
             # it exactly like any other LLM failure.
+            if attempt >= retries:
+                return None
+        except FuturesTimeoutError:
+            # The hard_timeout backstop fired — see this function's
+            # docstring for why this exists as a second, independent
+            # layer on top of get_llm()'s own client-level timeout.
+            # Same retry-then-None handling as every other failure mode
+            # above.
             if attempt >= retries:
                 return None
 
