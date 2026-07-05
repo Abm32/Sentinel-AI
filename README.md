@@ -1,5 +1,9 @@
 # Sentinel Clinical
 
+> 🏆 **RAISE Summit Hackathon — Vultr Track submission.** Public demo:
+> [`http://139.84.159.170:3000`](http://139.84.159.170:3000) ·
+> [Jump to the track compliance table ↓](#raise-summit-hackathon--vultr-track)
+
 Sentinel Clinical is an autonomous adverse drug event investigation
 engine. Given a clinical incident (e.g. "patient admitted after
 fluorouracil therapy, presenting with neutropenia"), it plans an
