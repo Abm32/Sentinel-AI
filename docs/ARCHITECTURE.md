@@ -39,6 +39,8 @@ Document Upload → Azure AI Document Intelligence (OCR + extraction, optional)
               anukriti-pgx-core (deterministic PGx tool)
 ```
 
+![Sentinel Clinical architecture diagram](./architecture-diagram.png)
+
 ## Why not VultronRetriever for reasoning
 
 This is worth stating plainly, because an earlier draft of this

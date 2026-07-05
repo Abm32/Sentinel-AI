@@ -156,6 +156,8 @@ Document Upload → Azure AI Document Intelligence (OCR + extraction, optional)
               anukriti-pgx-core (deterministic PGx tool)
 ```
 
+![Sentinel Clinical architecture diagram](docs/architecture-diagram.png)
+
 Every cloud dependency — both Vultr models and all three Azure services
 — is **optional at runtime**. Each one has a deterministic or local
 fallback, so the full investigation pipeline runs end-to-end with zero
