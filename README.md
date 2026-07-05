@@ -3,16 +3,83 @@
 Sentinel Clinical is an autonomous adverse drug event investigation
 engine. Given a clinical incident (e.g. "patient admitted after
 fluorouracil therapy, presenting with neutropenia"), it plans an
-investigation, gathers evidence, generates competing hypotheses with
-honest confidence scores, drafts a report, and puts that report through
-a second, skeptical AI reviewer before it can be finalized.
+investigation, gathers evidence, calls deterministic clinical tools,
+generates competing hypotheses with honest confidence scores, drafts a
+report, and puts that report through a second, skeptical AI reviewer
+before it can be finalized.
 
 The design commitment that runs through the whole system: **Sentinel
 refuses to guess.** If the evidence needed to confirm a root cause
 (e.g. a pharmacogenomic phenotype) was never retrieved, the investigation
 says so explicitly instead of fabricating a confident answer — and the
 Reviewer approves that refusal, rather than treating "I don't know" as a
-failure. See `docs/ARCHITECTURE.md` for how each agent enforces this.
+failure. It also refuses to let a report stand on population-level
+guidance alone: if the only evidence is "CPIC guidelines say patients
+with this phenotype should avoid this drug," the Reviewer treats that as
+insufficient until patient-specific genotype confirmation is retrieved.
+See `docs/ARCHITECTURE.md` for how each agent enforces this.
+
+## Investigation graph
+
+```
+planner → retrieval → tool_agent → hypothesis → reporter → reviewer
+                            ↑___________________________________|
+                              rejected: back to tool_agent
+                              (re-investigate, don't re-plan or
+                               re-search from scratch)
+```
+
+- **Planner** — turns free-text incident description into a
+  fixed-vocabulary task list (`retrieve_medication_history`,
+  `retrieve_pharmacogenomics`, `confirm_pharmacogenomic_genotype`,
+  `check_drug_interactions`, etc). LLM-backed with a deterministic
+  rule-based fallback; defensively re-injects
+  `retrieve_pharmacogenomics` if an LLM plan omits it, since the Tool
+  Agent hard-requires that exact task name to call the PGx engine.
+- **Retrieval Agent** — maps each Planner task to a candidate-search +
+  VultronRetriever rerank pass. Two-stage: a cheap broad candidate
+  search (Azure AI Search, or local keyword-overlap fallback) followed
+  by a precision rerank of those candidates via VultronRetriever's
+  `/v1/rerank`.
+- **Tool Agent** — executes deterministic clinical tools: `pgx-core`
+  (population-level CPIC pharmacogenomic recommendations),
+  `genotype-confirmation` (patient-specific diplotype/phenotype lookup,
+  called only when the Reviewer's rejection specifically demands it —
+  see "Why a genotype-confirmation tool" below), and a hardcoded
+  lab-trends stub used the same way.
+- **Hypothesis Agent** — the safety-critical node. Generates competing
+  hypotheses with confidence scores; enforces a pharmacogenomic
+  guardrail both in-prompt and post-hoc in code so the LLM cannot state
+  a phenotype as fact when no phenotype evidence was retrieved.
+  Patient-specific genotype confirmation (when present) raises the top
+  hypothesis's confidence above the single-source cap that a
+  guideline-only citation is held to.
+- **Reporter** — assembles the structured report (executive summary via
+  LLM, everything else deterministic extraction from tool outputs and
+  hypotheses). Treats "no hypotheses at all" the same as an explicit
+  unconfirmed status, rather than crashing or fabricating confidence.
+- **Reviewer** — a second, skeptical AI investigator. Unconfirmed/
+  honest-refusal reports are **always** approved deterministically,
+  never via the LLM (approving a refusal is not a judgment call).
+  Confirmed reports go through an LLM review with a one-way ratchet:
+  the LLM can be stricter than the rule-based baseline, never more
+  lenient. Rejections route back to the Tool Agent, not the Planner or
+  Retrieval Agent — re-investigation, not restart.
+
+### Why a genotype-confirmation tool
+
+`pgx-core`'s CPIC lookup answers "given a phenotype, what should we do
+about this drug?" — a population-level guideline, not confirmation that
+*this patient* was tested and found to carry that phenotype. In
+practice, the live LLM Reviewer flagged exactly this gap: a report
+citing only "CPIC says DPYD poor metabolizers should avoid
+fluorouracil" is guideline evidence, not patient evidence. The
+`genotype-confirmation` tool (`packages/tools/genotype_tool.py`) closes
+that gap — a stub today (hardcoded DPYD `*2A/*2A` → Poor Metabolizer
+result; in production this would query a clinical genotyping lab's
+LIS/LIMS or extract a PGx report via Document Intelligence), called by
+the Tool Agent only on a re-investigation pass when the Reviewer's
+rejection issues mention genotype/phenotype confirmation by name.
 
 ## Architecture at a glance
 
@@ -20,15 +87,16 @@ Two Vultr Serverless Inference models, each doing the job it's actually
 built for — plus Microsoft Azure as the secondary/optional data layer:
 
 - **VultronRetriever** (Flash/Core/Prime, Qwen3.5-based, #1 on ViDoRe V3)
-  — Sentinel's core evidence retrieval engine, via `/v1/rerank`. It
-  reads clinical evidence the way a clinician does, with full layout
+  — Sentinel's evidence retrieval engine, via `/v1/rerank`. It reads
+  clinical evidence the way a clinician does, with full layout
   awareness (tables, charts, scans), and reranks candidate evidence by
   relevance to the investigation.
-- **A Vultr-hosted chat-completion model** — the reasoning engine behind
-  planning, hypothesis generation, report synthesis, and review.
-  VultronRetriever cannot do this job (it has no chat-completion
-  capability, confirmed against Vultr's own docs); this is a standard
-  `/v1/chat/completions` call on the same endpoint and API key.
+- **A Vultr-hosted chat-completion model** (Kimi-K2.6) — the reasoning
+  engine behind planning, hypothesis generation, report synthesis, and
+  review. VultronRetriever cannot do this job (it has no
+  chat-completion capability, confirmed against Vultr's own docs); this
+  is a standard `/v1/chat/completions` call on the same endpoint and API
+  key.
 
 ```
 Document Upload → Azure AI Document Intelligence (OCR + extraction, optional)
@@ -53,14 +121,24 @@ fallback, so the full investigation pipeline runs end-to-end with zero
 cloud credentials configured. See `docs/ARCHITECTURE.md` for the full
 breakdown of what each service does and what its fallback is.
 
+**Known open item:** VultronRetriever currently sits in one node
+(Retrieval Agent reranking); all planning/hypothesis/report/review
+reasoning runs on the separate Vultr chat model, since VultronRetriever
+has no chat-completion capability. See `docs/ARCHITECTURE.md`'s
+"Why not VultronRetriever for reasoning" section for the technical
+justification, and treat this split as an open design question against
+any hackathon rule that requires VultronRetriever to drive the core
+reasoning loop rather than one retrieval step within it.
+
 ## Project layout
 
 ```
 packages/
   agents/          Planner, Retrieval, Tool Agent, Hypothesis, Reporter, Reviewer
-  tools/           pgx-core adapter, Document Intelligence adapter,
-                   AI Search / evidence-candidate adapter,
-                   VultronRetriever rerank adapter, tool registry
+  tools/           pgx-core adapter, genotype-confirmation adapter,
+                   Document Intelligence adapter, AI Search /
+                   evidence-candidate adapter, VultronRetriever rerank
+                   adapter, tool registry
   database/        Cosmos DB client (+ local JSON fallback)
   schemas/         InvestigationState (LangGraph state channel)
   graph.py         Builds and runs the LangGraph investigation graph
@@ -68,17 +146,32 @@ packages/
   config.py        Vultr rerank + Azure availability checks
 apps/
   api/             FastAPI app: REST + WebSocket streaming
+sentinel-dashboard/
+  Next.js live investigation dashboard (agent status, evidence,
+  hypotheses, report, timeline) consuming the API's REST + WebSocket
+  surface. See sentinel-dashboard/README.md for its own setup.
 docs/
   ARCHITECTURE.md  Full multi-cloud, two-model architecture writeup
 ```
 
 ## Setup
 
+Backend:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in real values, or leave blank to run on fallbacks
+```
+
+Dashboard (optional — the API works standalone via curl/WebSocket):
+
+```bash
+cd sentinel-dashboard
+npm install
+cp .env.local.example .env.local   # point at the running API
+npm run dev
 ```
 
 ## Running
@@ -110,6 +203,13 @@ curl -X POST http://127.0.0.1:8000/api/investigations \
   -H "Content-Type: application/json" \
   -d '{"case_id": "case-1", "incident": "Patient admitted after fluorouracil therapy. Symptoms: neutropenia, mucositis, diarrhea, fever."}'
 
+# Optionally seed structured evidence already on file (e.g. a genomic
+# report), so tool_agent.py can see a patient-specific phenotype without
+# it needing to come from free text:
+curl -X POST http://127.0.0.1:8000/api/investigations \
+  -H "Content-Type: application/json" \
+  -d '{"case_id": "case-2", "incident": "...", "retrieved_evidence": [{"source": "genomic_report", "gene": "DPYD", "phenotype": "Poor Metabolizer"}]}'
+
 # Poll for progress / the final report
 curl http://127.0.0.1:8000/api/investigations/case-1
 
@@ -118,7 +218,17 @@ curl -X POST http://127.0.0.1:8000/api/investigations/case-1/upload -F "file=@la
 ```
 
 Or connect to `ws://127.0.0.1:8000/api/investigations/case-1/stream` for
-live, node-by-node progress as the graph runs instead of polling.
+live, node-by-node progress as the graph runs instead of polling — this
+is what the dashboard uses.
+
+**Known issue:** the LLM reasoning path (`packages/llm.py::get_llm()`)
+does not currently set a request timeout on the underlying
+`ChatOpenAI` client, and a full graph run has been observed to hang
+without producing output under some conditions even though the Vultr
+chat endpoint itself responds in ~1-2s when called directly. If
+`python -m packages.graph` or an investigation appears stuck, this is
+the first place to look; setting an explicit `request_timeout` and/or
+adding per-node timeouts in the graph is the planned fix.
 
 ## Environment variables
 
@@ -126,6 +236,13 @@ See `.env.example` for the full list. Every credential is optional —
 copy the file to `.env` and fill in only the services you want to run
 against real cloud backends; leave the rest blank to use the
 deterministic/local fallback for that subsystem.
+
+Note: nothing in this codebase calls `load_dotenv()` — `.env` is not
+loaded automatically by the app itself. Export its contents into the
+process environment (`set -a; source .env; set +a` before running
+`uvicorn`/`python`, or use `--env-file` / a process manager's
+environment-file support) or the app will silently run on local
+fallbacks even with a fully-filled `.env` sitting next to it.
 
 ## Microsoft Azure Integration
 
@@ -138,3 +255,15 @@ Sentinel Clinical uses three Azure AI services as part of its multi-cloud archit
 - **Azure Cosmos DB** — Stores investigation state, evidence, hypotheses, and finalized reports as JSON documents with serverless scaling.
 
 All Azure services are optional — the application includes deterministic local fallbacks for each. Azure services enhance the document processing pipeline while Vultr Serverless Inference handles all LLM workloads.
+
+## Project status
+
+- ✅ LangGraph investigation pipeline (all 6 nodes) implemented and
+  wired, LLM-backed with deterministic fallbacks throughout
+- ✅ FastAPI backend: REST CRUD + WebSocket streaming + document upload
+- ✅ Next.js live dashboard (`sentinel-dashboard/`)
+- ✅ Azure AI Document Intelligence, AI Search, Cosmos DB — provisioned
+  and verified live (not just fallback-tested)
+- ⬜ Backend deployment on a Vultr VM (public demo URL) — not yet done
+- ⬜ Recorded demo video — not yet done
+- ⬜ Known LLM-path hang under investigation (see "Running" above)
