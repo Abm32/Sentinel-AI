@@ -19,6 +19,43 @@ with this phenotype should avoid this drug," the Reviewer treats that as
 insufficient until patient-specific genotype confirmation is retrieved.
 See `docs/ARCHITECTURE.md` for how each agent enforces this.
 
+## Use case: why this exists
+
+Adverse drug event (ADE) investigation today is mostly manual. A
+pharmacovigilance team gets an incident report (e.g. a patient
+hospitalized after a chemotherapy cycle), and someone has to: pull the
+medication history, check lab trends, look up whether a genetic factor
+explains the toxicity, cross-reference CPIC/FDA guidance, weigh
+alternative explanations (drug interaction? infection? dosing error?),
+and write a report that a second clinician will scrutinize before it's
+accepted. That process is slow, inconsistent between investigators, and
+— this is the part Sentinel is built around — has no built-in resistance
+to a *confident-sounding but under-evidenced* conclusion. A generic LLM
+asked "why did this patient get sick" will happily produce a fluent,
+specific-sounding answer whether or not the evidence actually supports
+it.
+
+Sentinel's worked example is exactly this: a patient develops severe
+neutropenia, mucositis, and fever after fluorouracil (a chemotherapy
+drug). The textbook explanation is DPYD poor-metabolizer status — a
+genetic variant that makes ~1 in 200 patients unable to safely process
+fluoropyrimidine drugs, per CPIC guidelines. But "this drug class can
+cause this in patients with this genotype" (population-level guidance)
+is not the same claim as "this patient has that genotype" (a lab result
+that either exists or doesn't). Sentinel is built to keep those two
+claims separate all the way through the investigation, and to make the
+system's own reviewer catch it if they ever get conflated — instead of
+trusting a single LLM call to get that distinction right on its own.
+
+The pattern generalizes beyond pharmacogenomics: any domain where an
+automated system might be asked to explain an adverse outcome from
+partial evidence — clinical, financial fraud review, industrial incident
+investigation — runs into the same failure mode (a model that answers
+confidently regardless of whether the evidence supports it). Sentinel's
+plan → retrieve → act → hypothesize → report → adversarial-review loop,
+with an explicit right to refuse at the end, is a template for that
+class of problem, not just a DPYD demo.
+
 ## Investigation graph
 
 ```
@@ -221,14 +258,18 @@ Or connect to `ws://127.0.0.1:8000/api/investigations/case-1/stream` for
 live, node-by-node progress as the graph runs instead of polling — this
 is what the dashboard uses.
 
-**Known issue:** the LLM reasoning path (`packages/llm.py::get_llm()`)
-does not currently set a request timeout on the underlying
-`ChatOpenAI` client, and a full graph run has been observed to hang
-without producing output under some conditions even though the Vultr
-chat endpoint itself responds in ~1-2s when called directly. If
-`python -m packages.graph` or an investigation appears stuck, this is
-the first place to look; setting an explicit `request_timeout` and/or
-adding per-node timeouts in the graph is the planned fix.
+**Known issue (fixed):** an earlier version of this project appeared to
+hang indefinitely on LLM-backed nodes with no output. Root cause:
+`moonshotai/Kimi-K2.6` is a reasoning model that spends completion
+tokens on hidden chain-of-thought before emitting an answer, and the
+original `max_tokens=4096` was too small for it to ever finish —
+`llm_json_call()`'s retry loop kept retrying the same doomed request,
+which looked like an ever-lengthening hang. Fixed in
+`packages/llm.py`: `max_tokens` raised to 16000, a memoized/pooled LLM
+client (a fresh, unclosed client per call was leaking connections
+under sustained load), and an independent wall-clock timeout backstop
+around every LLM call so no single request can block the graph
+indefinitely. See that module's docstrings for the full diagnosis.
 
 ## Environment variables
 
@@ -256,14 +297,39 @@ Sentinel Clinical uses three Azure AI services as part of its multi-cloud archit
 
 All Azure services are optional — the application includes deterministic local fallbacks for each. Azure services enhance the document processing pipeline while Vultr Serverless Inference handles all LLM workloads.
 
-## Project status
+## Contributing
 
-- ✅ LangGraph investigation pipeline (all 6 nodes) implemented and
-  wired, LLM-backed with deterministic fallbacks throughout
-- ✅ FastAPI backend: REST CRUD + WebSocket streaming + document upload
-- ✅ Next.js live dashboard (`sentinel-dashboard/`)
-- ✅ Azure AI Document Intelligence, AI Search, Cosmos DB — provisioned
-  and verified live (not just fallback-tested)
-- ⬜ Backend deployment on a Vultr VM (public demo URL) — not yet done
-- ⬜ Recorded demo video — not yet done
-- ⬜ Known LLM-path hang under investigation (see "Running" above)
+This project follows the same principle its Reviewer agent enforces:
+don't add a confident-sounding capability the evidence doesn't support.
+Concretely, that means:
+
+- **New tools** (like `packages/tools/genotype_tool.py`) should be
+  honest about what's real vs. a stub — if it's a hardcoded demo
+  response, say so in the module docstring, and name the exact
+  `insufficient_evidence` / refusal shape it returns when it can't
+  answer for real. Every tool in this project follows that contract;
+  new ones should too.
+- **New LLM-backed agent nodes** should ship with a deterministic
+  rule-based fallback (see `llm_available()` in `packages/llm.py`) —
+  the project's core guarantee is that the full graph runs end-to-end
+  with zero cloud credentials configured, and a new node that only
+  works with a live API key breaks that guarantee.
+- **Guardrails are not optional cleanup** — if you add a node that can
+  influence the final root-cause confidence, look at how
+  `packages/agents/hypothesis.py` enforces its no-guessing rule both
+  in-prompt *and* post-hoc in code, and do the same. Trusting a single
+  LLM call to self-police is exactly the failure mode this project
+  exists to avoid.
+- Run `python -m packages.graph` before opening a PR — it smoke-tests
+  both the confirmed-root-cause loop and the honest-refusal path
+  end-to-end with no external services required.
+
+Issues and PRs are welcome. If you're adding a new clinical tool
+integration (a real LIS/LIMS call, a real lab-results API, etc. instead
+of the current demo stubs), please open an issue first to discuss the
+evidence contract it should expose — see "Why a genotype-confirmation
+tool" above for the shape that decision usually takes.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
