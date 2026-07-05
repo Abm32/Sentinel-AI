@@ -134,10 +134,37 @@ def _rule_based_hypothesis(state: InvestigationState) -> dict:
         if lab_output is not None:
             top_evidence.append(f"lab_trends: {lab_output['interpretation']}")
 
+        # genotype-confirmation, when present, is patient-specific
+        # lab-confirmed evidence — independent of pgx-core's
+        # guideline-level recommendation, not a restatement of it. Its
+        # presence is exactly what the live Reviewer (reviewer.py) asks
+        # for when it rejects a report backed only by a CPIC guideline,
+        # so a corroborating top-hypothesis confidence above the
+        # single-source 60% cap is warranted once it's on file — same
+        # "corroboration required for high confidence" rule the
+        # Hypothesis Agent's own prompt states above, just applied here
+        # in the deterministic fallback too.
+        genotype_output = _find_output(state, "genotype-confirmation")
+        top_confidence = 0.76
+        alt_confidence = 0.17
+        renal_confidence = 0.07
+        if genotype_output is not None and genotype_output.get("status") == "confirmed":
+            top_evidence.append(
+                f"genotype-confirmation: {genotype_output['diplotype']} "
+                f"({genotype_output['phenotype']}), patient-specific lab result"
+            )
+            # Scale the two alternatives down proportionally so all three
+            # still sum to ~100% (the Hypothesis Agent's own prompt rule)
+            # once the top hypothesis's confidence rises with
+            # corroborating patient-specific evidence.
+            top_confidence = 0.91
+            alt_confidence = 0.06
+            renal_confidence = 0.03
+
         hypotheses = [
             {
                 "title": "DPYD-mediated fluorouracil toxicity",
-                "confidence": 0.76,
+                "confidence": top_confidence,
                 "status": "confirmed",
                 "supporting_evidence": top_evidence,
                 "contradicting_evidence": [],
@@ -145,7 +172,7 @@ def _rule_based_hypothesis(state: InvestigationState) -> dict:
             },
             {
                 "title": "Drug interaction",
-                "confidence": 0.17,
+                "confidence": alt_confidence,
                 "status": "confirmed",
                 "supporting_evidence": [],
                 "contradicting_evidence": [],
@@ -153,7 +180,7 @@ def _rule_based_hypothesis(state: InvestigationState) -> dict:
             },
             {
                 "title": "Renal impairment",
-                "confidence": 0.07,
+                "confidence": renal_confidence,
                 "status": "confirmed",
                 "supporting_evidence": (
                     [f"lab_trends: {lab_output['interpretation']}"]
@@ -210,6 +237,21 @@ def _describe_tool_outputs(state: InvestigationState) -> str:
                     f"- pgx-core: INSUFFICIENT_EVIDENCE. gene={output.get('gene')} "
                     f"drug={output.get('drug')} phenotype={output.get('phenotype')} "
                     "-- NO PHENOTYPE WAS AVAILABLE. You must not guess one."
+                )
+        elif tool == "genotype-confirmation":
+            if status == "confirmed":
+                lines.append(
+                    f"- genotype-confirmation: CONFIRMED. gene={output.get('gene')} "
+                    f"diplotype={output.get('diplotype')} phenotype={output.get('phenotype')} "
+                    f"lab={output.get('lab')} test_date={output.get('test_date')} "
+                    "-- this is a PATIENT-SPECIFIC lab-confirmed genotype result, "
+                    "not a population-level guideline. Corroborates pgx-core's "
+                    "recommendation with independent, patient-level evidence."
+                )
+            else:
+                lines.append(
+                    f"- genotype-confirmation: INSUFFICIENT_EVIDENCE. "
+                    f"gene={output.get('gene')} -- {output.get('blocker', 'no genotype test result available')}."
                 )
         elif tool == "lab_trends":
             lines.append(f"- lab_trends: {status}. {output.get('interpretation', '')}")

@@ -124,7 +124,12 @@ def run_path_b() -> InvestigationState:
     return app.invoke(state)
 
 
-def run_investigation(case_id: str, incident: str, documents: list | None = None):
+def run_investigation(
+    case_id: str,
+    incident: str,
+    documents: list | None = None,
+    retrieved_evidence: list | None = None,
+):
     """
     Generator that runs the investigation graph and yields a state
     snapshot after each node completes.
@@ -147,11 +152,26 @@ def run_investigation(case_id: str, incident: str, documents: list | None = None
         documents: Optional pre-loaded documents (e.g. output of
             `doc_intel_tool.extract_clinical_document`) to seed
             `InvestigationState.documents` before the graph starts.
+        retrieved_evidence: Optional pre-seeded evidence entries (e.g. a
+            structured genomic report already on file:
+            `{"source": "genomic_report", "gene": "DPYD", "phenotype":
+            "Poor Metabolizer"}`) to seed `InvestigationState.
+            retrieved_evidence` before the graph starts. This is the
+            only way `tool_agent.py::_find_phenotype` can see a
+            phenotype today — free text in `incident` is NOT parsed
+            into structured evidence by any node. Mirrors how
+            `packages/graph.py`'s own demo scenarios (`run_path_a`)
+            seed this field directly, so the API-driven path can
+            reproduce the same confirmed-root-cause / reject ->
+            re-investigate -> approve loop instead of only the refusal
+            path.
     """
     app = build_graph()
     initial_state = new_investigation(case_id=case_id, incident=incident)
     if documents:
         initial_state["documents"] = documents
+    if retrieved_evidence:
+        initial_state["retrieved_evidence"] = retrieved_evidence
 
     for event in app.stream(initial_state):
         for node_name, state_update in event.items():

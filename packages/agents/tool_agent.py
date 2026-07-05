@@ -1,11 +1,20 @@
 """
 Tool Agent node — reads the Planner's task list and executes tools.
 
-Two tools are wired for real (well, "real" relative to this project's
+Three tools are wired for real (well, "real" relative to this project's
 current stage):
 
   - retrieve_pharmacogenomics -> pgx-core (packages/tools/pgx_tool.py),
     a genuine third-party call.
+  - confirm_pharmacogenomic_genotype -> the genotype-confirmation stub
+    (packages/tools/genotype_tool.py). NOT run on the first pass — see
+    `_genotype_requested` below. This tool exists specifically to
+    answer the Reviewer's objection that a CPIC guideline recommendation
+    is population-level evidence, not confirmation that *this patient*
+    was actually tested and found to carry the phenotype. Confirmed
+    against a live Reviewer run (Kimi-K2.6): this is exactly the
+    objection it raises when pgx-core's guideline-level "AVOID" is the
+    only evidence in the report.
   - retrieve_lab_trends -> a hardcoded stub returning fixed lab evidence
     (neutropenia trend, normal eGFR). Not a real lab-retrieval backend —
     exists to prove the Reviewer's reject -> re-investigate -> approve
@@ -15,7 +24,7 @@ Every other planned task remains an explicit not_implemented stub.
 
 Re-investigation behavior: this node runs once per pass through the
 graph, and the graph can route back into it after a Reviewer rejection
-(see packages/graph.py's conditional edge). Two things matter for that:
+(see packages/graph.py's conditional edge). Three things matter for that:
 
   1. pgx-core is NOT re-called if a confirmed/insufficient-evidence result
      already exists in tool_outputs from a prior pass — it's deterministic
@@ -26,6 +35,13 @@ graph, and the graph can route back into it after a Reviewer rejection
      action == "retrieve_labs") and it hasn't already been supplied —
      otherwise every pass would silently start fabricating evidence that
      wasn't requested.
+  3. genotype-confirmation only runs when the Reviewer's rejection issues
+     mention genotype/phenotype confirmation specifically (in either the
+     `action` or `description` field — the live LLM Reviewer phrases the
+     action differently pass to pass, e.g. "Retrieve DPYD genotype
+     results..." vs. "Obtain confirmatory pharmacogenomic testing...", so
+     this checks free text rather than a single fixed action string) and
+     hasn't already been supplied.
 """
 
 from __future__ import annotations
@@ -83,6 +99,27 @@ def _labs_requested_and_missing(state: InvestigationState) -> bool:
     return requested and not _already_ran(state, "lab_trends")
 
 
+# Free-text markers the Reviewer's rejection issues use when demanding
+# patient-specific genotype/phenotype confirmation. Checked against both
+# `action` and `description` rather than a single fixed action string:
+# the live LLM Reviewer (Kimi-K2.6) phrases the requested action
+# differently pass to pass ("Retrieve DPYD genotype results...",
+# "Obtain confirmatory pharmacogenomic testing...", "revise the root
+# cause to 'Suspected DPYD Poor Metabolizer'...") — a single hardcoded
+# action string like the lab stub's "retrieve_labs" would miss most of
+# these in practice.
+_GENOTYPE_REQUEST_MARKERS = ("genotype", "phenotype")
+
+
+def _genotype_requested_and_missing(state: InvestigationState) -> bool:
+    requested = any(
+        any(marker in str(issue.get(field, "")).lower() for field in ("action", "description"))
+        for issue in state.get("review_issues", [])
+        for marker in _GENOTYPE_REQUEST_MARKERS
+    )
+    return requested and not _already_ran(state, "genotype-confirmation")
+
+
 def tool_agent_node(state: InvestigationState) -> dict:
     """
     LangGraph node. Returns only the fields that changed: `tool_outputs`
@@ -102,6 +139,9 @@ def tool_agent_node(state: InvestigationState) -> dict:
         )
         outputs.append(result)
 
+    if _genotype_requested_and_missing(state):
+        outputs.append(call_tool("genotype-confirmation", gene=_DEMO_GENE))
+
     if _labs_requested_and_missing(state):
         outputs.append(dict(_LAB_STUB_RESULT))
 
@@ -111,7 +151,11 @@ def tool_agent_node(state: InvestigationState) -> dict:
     # entries piling up under the operator.add reducer on every retry).
     if not state.get("tool_outputs"):
         for task in tasks:
-            if task["task"] in ("retrieve_pharmacogenomics", "retrieve_lab_trends"):
+            if task["task"] in (
+                "retrieve_pharmacogenomics",
+                "retrieve_lab_trends",
+                "confirm_pharmacogenomic_genotype",
+            ):
                 continue
             outputs.append({"task": task["task"], "status": "not_implemented"})
 

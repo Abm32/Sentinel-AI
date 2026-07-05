@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from packages.tools.doc_intel_tool import extract_clinical_document
+from packages.tools.genotype_tool import get_genotype_confirmation
 from packages.tools.pgx_tool import get_pharmacogenomic_recommendation
 from packages.tools.retrieval_tool import search_evidence
 
@@ -25,6 +26,7 @@ ToolFn = Callable[..., dict[str, Any]]
 
 TOOL_REGISTRY: dict[str, ToolFn] = {
     "pgx-core": get_pharmacogenomic_recommendation,
+    "genotype-confirmation": get_genotype_confirmation,
     "document-intelligence": extract_clinical_document,
     "evidence-search": search_evidence,
 }

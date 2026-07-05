@@ -37,6 +37,18 @@ router = APIRouter(prefix="/investigations", tags=["investigations"])
 class CreateInvestigationRequest(BaseModel):
     case_id: str = Field(description="Unique identifier for this investigation")
     incident: str = Field(description="Free-text clinical presentation / incident description")
+    retrieved_evidence: list[dict] | None = Field(
+        default=None,
+        description=(
+            "Optional structured evidence to seed before the graph starts "
+            "(e.g. a genomic report already on file: {'source': "
+            "'genomic_report', 'gene': 'DPYD', 'phenotype': 'Poor "
+            "Metabolizer'}). Free text in `incident` is NOT parsed into "
+            "structured evidence by any node — this is currently the only "
+            "way to make a patient-specific phenotype visible to "
+            "tool_agent.py::_find_phenotype via the API."
+        ),
+    )
 
 
 class CreateInvestigationResponse(BaseModel):
@@ -44,7 +56,9 @@ class CreateInvestigationResponse(BaseModel):
     status: str
 
 
-def _execute_investigation(case_id: str, incident: str) -> None:
+def _execute_investigation(
+    case_id: str, incident: str, retrieved_evidence: list[dict] | None = None
+) -> None:
     """Runs synchronously inside a BackgroundTask (i.e. after the HTTP
     response has already been sent). Persists the state after every
     graph step so GET reflects live progress, and publishes each step
@@ -56,7 +70,9 @@ def _execute_investigation(case_id: str, incident: str) -> None:
     save_investigation(dict(last_state))
 
     try:
-        for node_name, state_update in run_investigation(case_id=case_id, incident=incident):
+        for node_name, state_update in run_investigation(
+            case_id=case_id, incident=incident, retrieved_evidence=retrieved_evidence
+        ):
             last_state.update(state_update)
             save_investigation(dict(last_state))
             events.publish(case_id, node_name, state_update)
@@ -80,7 +96,9 @@ def create_investigation(
             status_code=409, detail=f"Investigation '{request.case_id}' already exists."
         )
 
-    background_tasks.add_task(_execute_investigation, request.case_id, request.incident)
+    background_tasks.add_task(
+        _execute_investigation, request.case_id, request.incident, request.retrieved_evidence
+    )
 
     return CreateInvestigationResponse(case_id=request.case_id, status="planning")
 

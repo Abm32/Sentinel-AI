@@ -44,6 +44,7 @@ _TASK_VOCABULARY = (
     "retrieve_medication_history",
     "retrieve_lab_trends",
     "retrieve_pharmacogenomics",
+    "confirm_pharmacogenomic_genotype",
     "retrieve_fda_label",
     "retrieve_cpic_guidelines",
     "check_drug_interactions",
@@ -52,10 +53,23 @@ _TASK_VOCABULARY = (
 
 # Fixed plan for the fluorouracil / DPYD-shaped demo incident. The
 # rule-based fallback doesn't branch on incident content.
+#
+# confirm_pharmacogenomic_genotype sits right after
+# retrieve_pharmacogenomics: pgx-core's guideline-level "AVOID"
+# recommendation is population-level evidence, not confirmation that
+# this specific patient was tested and found to carry the phenotype —
+# the live Reviewer (packages/agents/reviewer.py) flags exactly this
+# gap when it's the only evidence in a report. Including the task in
+# the plan from the start signals the investigation's intent to close
+# that gap; packages/agents/tool_agent.py currently only calls the
+# genotype-confirmation tool once the Reviewer actually asks for it on
+# a re-investigation pass, not on the first pass (see that module's
+# docstring) — the task's presence here doesn't change that timing.
 _DEFAULT_TASK_LIST: list[dict] = [
     {"task": "retrieve_medication_history", "priority": "high"},
     {"task": "retrieve_lab_trends", "priority": "high"},
     {"task": "retrieve_pharmacogenomics", "priority": "high"},
+    {"task": "confirm_pharmacogenomic_genotype", "priority": "high"},
     {"task": "retrieve_fda_label", "priority": "medium"},
     {"task": "retrieve_cpic_guidelines", "priority": "medium"},
     {"task": "check_drug_interactions", "priority": "medium"},
@@ -112,6 +126,33 @@ def _llm_planner(state: InvestigationState) -> dict:
     valid_tasks = [t for t in tasks if t["task"] in _TASK_VOCABULARY]
     if not valid_tasks:
         return _rule_based_planner(state)
+
+    # Defensive: tool_agent.py hard-requires the literal task name
+    # "retrieve_pharmacogenomics" to call pgx-core at all — it is not
+    # interchangeable with "confirm_pharmacogenomic_genotype" from that
+    # module's point of view, even though an LLM plan can reasonably
+    # (if unhelpfully) treat them as covering the same ground and omit
+    # one. Observed in practice: the live planner (Kimi-K2.6) sometimes
+    # includes confirm_pharmacogenomic_genotype but drops
+    # retrieve_pharmacogenomics, which means pgx-core never runs, the
+    # Hypothesis Agent has nothing to score, and hypotheses ends up
+    # empty — a silent, avoidable failure mode rather than an honest
+    # refusal. Inject it defensively (mirroring the rule-based plan's
+    # own "high" priority for this task) rather than let a downstream
+    # node quietly get zero evidence because of a planning omission.
+    if not any(t["task"] == "retrieve_pharmacogenomics" for t in valid_tasks):
+        valid_tasks.append(
+            {
+                "task": "retrieve_pharmacogenomics",
+                "priority": "high",
+                "rationale": (
+                    "Required for pgx-core's clinical-action lookup; "
+                    "added defensively — the investigation plan omitted "
+                    "this task despite the incident's pharmacogenomic "
+                    "relevance."
+                ),
+            }
+        )
 
     return {
         "tasks": valid_tasks,

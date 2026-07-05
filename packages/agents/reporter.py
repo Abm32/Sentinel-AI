@@ -162,6 +162,12 @@ def reporter_node(state: InvestigationState) -> dict:
                 supporting_evidence.append(
                     f"pgx-core: {output['action']} — {output['recommendation']}"
                 )
+            elif output.get("tool") == "genotype-confirmation":
+                supporting_evidence.append(
+                    f"genotype-confirmation: {output['diplotype']} "
+                    f"({output['phenotype']}) — patient-specific result, "
+                    f"{output['lab']}, {output['test_date']}"
+                )
             elif output.get("tool") == "lab_trends":
                 supporting_evidence.append(f"lab_trends: {output['interpretation']}")
         citations.extend(output.get("citations", []))
@@ -171,8 +177,16 @@ def reporter_node(state: InvestigationState) -> dict:
         missing_evidence.extend(top.get("blockers", []))
 
     # Source of truth: the top hypothesis's own status field, not a
-    # re-derivation from confidence. See module docstring.
-    is_unconfirmed = top is not None and top.get("status") == "unconfirmed"
+    # re-derivation from confidence. See module docstring. `top is None`
+    # (no hypotheses at all — e.g. the Planner's task list omitted
+    # retrieve_pharmacogenomics on a given LLM pass, so no pgx-core
+    # output existed for the Hypothesis Agent to score) is ALSO treated
+    # as unconfirmed: there is nothing to confirm, and the alternative —
+    # falling through to _confirmed_summary(None) — crashes the node
+    # instead of producing an honest "cannot conclude" report. Same
+    # "never claim confidence the evidence doesn't support" principle
+    # this module already applies to an explicit unconfirmed status.
+    is_unconfirmed = top is None or top.get("status") == "unconfirmed"
 
     report = {
         "case_id": state["case_id"],

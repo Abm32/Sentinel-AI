@@ -37,6 +37,10 @@ Division of labor with the Tool Agent (packages/agents/tool_agent.py):
     resolved phenotype. The Retrieval Agent does NOT call pgx-core, and
     does NOT rerank pgx-core's output (nothing to rerank — it's a
     single deterministic answer, not a set of candidate documents).
+  - `confirm_pharmacogenomic_genotype` is likewise a Tool Agent job, not
+    a search task (packages/tools/genotype_tool.py) — same reasoning as
+    `retrieve_pharmacogenomics`: it's a deterministic lookup keyed by
+    gene, not something to search a document index for and rerank.
   - `build_timeline` is not yet implemented by either agent — it stays
     a `not_implemented` stub, produced by the Tool Agent as before.
 
