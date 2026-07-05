@@ -10,6 +10,13 @@ interface EvidencePanelProps {
 }
 
 function labelFor(item: EvidenceItem): string {
+  // packages/agents/retrieval_2.py's hypothesis-driven validation pass
+  // -- label with the stance (supporting/contradicting) rather than
+  // falling back to the generic doc source, so it's visually distinct
+  // from round-1 general evidence in the panel.
+  if (item.retrieved_for_task === "hypothesis_validation" && item.validation_stance) {
+    return `VultronRetriever round 2 — ${item.validation_stance}`;
+  }
   return (
     item.tool ??
     item.source ??

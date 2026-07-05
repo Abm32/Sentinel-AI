@@ -9,13 +9,19 @@ interface HypothesesPanelProps {
 }
 
 export function HypothesesPanel({ hypotheses }: HypothesesPanelProps) {
-  // Only render the latest round's hypotheses — see hypothesis.py's
-  // `round` tagging. Falls back to all of them if round is absent
-  // (rule-based fallback still sets it, but be defensive).
+  // Mirrors packages/agents/reporter.py::_latest_hypotheses -- within
+  // the latest round, prefer the post-validation set (validation_pass
+  // === 1, i.e. re-scored after retrieval_2.py's targeted
+  // VultronRetriever pass) over the pre-validation set from earlier in
+  // the same round. `round` alone is not enough to disambiguate: both
+  // the pre- and post-validation hypothesis_node calls share the same
+  // round within one Reviewer retry pass.
   const latestRound = hypotheses.length
     ? Math.max(...hypotheses.map((h) => h.round ?? 0))
     : 0;
-  const latest = hypotheses.filter((h) => (h.round ?? 0) === latestRound);
+  const thisRound = hypotheses.filter((h) => (h.round ?? 0) === latestRound);
+  const postValidation = thisRound.filter((h) => h.validation_pass === 1);
+  const latest = postValidation.length > 0 ? postValidation : thisRound;
   const sorted = [...latest].sort((a, b) => b.confidence - a.confidence);
   const top = sorted[0];
 

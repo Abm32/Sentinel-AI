@@ -8,6 +8,7 @@ import {
   ClipboardList,
   FileSearch,
   Loader2,
+  ScanEye,
   ScanSearch,
   ShieldCheck,
   Wrench,
@@ -34,6 +35,7 @@ const AGENT_ICON: Record<AgentName, React.ElementType> = {
   Retrieval: ScanSearch,
   "Tool Agent": Wrench,
   Hypothesis: Brain,
+  "Retrieval (Validation)": ScanEye,
   Reporter: FileSearch,
   Reviewer: ShieldCheck,
 };

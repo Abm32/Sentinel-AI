@@ -9,6 +9,7 @@ export type AgentName =
   | "Retrieval"
   | "Tool Agent"
   | "Hypothesis"
+  | "Retrieval (Validation)"
   | "Reporter"
   | "Reviewer";
 
@@ -38,6 +39,13 @@ export interface EvidenceItem {
   retrieved_for_task?: string;
   reranked_by?: string;
   citations?: string[];
+  // packages/agents/retrieval_2.py's hypothesis-driven validation pass:
+  // present only on evidence tagged retrieved_for_task ===
+  // "hypothesis_validation" -- which leading hypothesis the query was
+  // built from, and whether VultronRetriever was reranking for
+  // supporting or contradicting evidence.
+  validation_target?: string;
+  validation_stance?: "supporting" | "contradicting" | string;
   [key: string]: unknown;
 }
 
@@ -50,6 +58,12 @@ export interface Hypothesis {
   contradicting_evidence?: string[];
   blockers?: string[];
   round?: number;
+  // 0 = first pass this round, 1 = re-scored after
+  // packages/agents/retrieval_2.py's targeted VultronRetriever pass.
+  // See hypothesis.py's hypothesis_node docstring — round alone cannot
+  // disambiguate the pre- and post-validation calls within one retry
+  // pass.
+  validation_pass?: number;
 }
 
 // packages/agents/reviewer.py::ReviewResult
@@ -108,6 +122,7 @@ export interface InvestigationState {
   confidence?: number | null;
   report?: Report | null;
   status?: string;
+  hypothesis_validated?: boolean;
 }
 
 // apps/api/routers/investigations.py WebSocket message shape:
@@ -118,12 +133,13 @@ export type StreamMessage =
   | { done: true; state: InvestigationState };
 
 // Backend node_name -> display agent name
-// (graph.py's node names: planner, retrieval, tool_agent, hypothesis, reporter, reviewer)
+// (graph.py's node names: planner, retrieval, tool_agent, hypothesis, retrieval_2, reporter, reviewer)
 export const NODE_TO_AGENT: Record<string, AgentName> = {
   planner: "Planner",
   retrieval: "Retrieval",
   tool_agent: "Tool Agent",
   hypothesis: "Hypothesis",
+  retrieval_2: "Retrieval (Validation)",
   reporter: "Reporter",
   reviewer: "Reviewer",
 };
@@ -133,6 +149,7 @@ export const AGENT_ORDER: AgentName[] = [
   "Retrieval",
   "Tool Agent",
   "Hypothesis",
+  "Retrieval (Validation)",
   "Reporter",
   "Reviewer",
 ];
@@ -142,6 +159,8 @@ export const CURRENT_ACTION_LABEL: Record<AgentName, string> = {
   Retrieval: "Searching and reranking evidence via VultronRetriever...",
   "Tool Agent": "Running pharmacogenomic and lab tools...",
   Hypothesis: "Scoring competing hypotheses...",
+  "Retrieval (Validation)":
+    "VultronRetriever: targeted search for/against the leading hypothesis...",
   Reporter: "Drafting investigation report...",
   Reviewer: "Reviewing report for evidentiary sufficiency...",
 };

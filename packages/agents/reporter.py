@@ -42,12 +42,29 @@ from packages.schemas.investigation_state import InvestigationState, Investigati
 
 
 def _latest_hypotheses(state: InvestigationState) -> list[dict]:
+    """Selects the hypothesis set the report should be built from:
+    within the current `retry_count` round, prefer the POST-validation
+    set (`validation_pass == 1`) if retrieval_2.py's targeted
+    VultronRetriever pass ran and hypothesis.py re-scored with it — that
+    re-score is strictly more informed than the pre-validation set from
+    earlier in the same round, since it saw evidence targeted at the
+    leading hypothesis that the first call couldn't have. Falls back to
+    the pre-validation set (`validation_pass == 0`) if retrieval_2
+    hasn't run yet for this round (e.g. Path B's honest refusal, which
+    retrieval_2_node explicitly skips), then to every hypothesis ever
+    produced as a last resort if round-tag filtering somehow yields
+    nothing (defensive, not expected in practice)."""
     hypotheses = state.get("hypotheses", [])
     if not hypotheses:
         return []
     current_round = state.get("retry_count", 0)
-    latest = [h for h in hypotheses if h.get("round") == current_round]
-    return latest if latest else hypotheses
+    this_round = [h for h in hypotheses if h.get("round", 0) == current_round]
+    post_validation = [h for h in this_round if h.get("validation_pass", 0) == 1]
+    if post_validation:
+        return post_validation
+    if this_round:
+        return this_round
+    return hypotheses
 
 
 def _latest_tool_outputs(state: InvestigationState) -> list[dict]:

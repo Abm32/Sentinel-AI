@@ -50,6 +50,15 @@ class InvestigationState(TypedDict):
     report: Optional[dict[str, Any]]
     status: InvestigationStatus
 
+    # Gates retrieval_2 (packages/agents/retrieval_2.py) to run exactly
+    # once per investigation, not once per Reviewer reject ->
+    # re-investigate pass. Without this, every retry loop would re-run
+    # a full VultronRetriever hypothesis-validation pass even though the
+    # top hypothesis rarely changes shape between retries (only its
+    # supporting evidence grows) -- one targeted validation pass per
+    # investigation is the intended design, not one per retry.
+    hypothesis_validated: bool
+
 
 def new_investigation(case_id: str, incident: str) -> InvestigationState:
     """Construct a fresh, fully-initialized InvestigationState.
@@ -79,4 +88,5 @@ def new_investigation(case_id: str, incident: str) -> InvestigationState:
         confidence=None,
         report=None,
         status=InvestigationStatus.PLANNING,
+        hypothesis_validated=False,
     )

@@ -1,7 +1,7 @@
 """
 The investigation graph: START -> planner -> retrieval -> tool_agent ->
-hypothesis -> reporter -> reviewer -> (approved: END | rejected: back to
-tool_agent).
+hypothesis -> retrieval_2 -> hypothesis -> reporter -> reviewer ->
+(approved: END | rejected: back to tool_agent).
 
 Run directly for a smoke test covering all three demo scenarios:
 
@@ -34,6 +34,20 @@ build_graph()'s edges below) — only tool_agent and downstream nodes
 re-run on that path, matching the existing re-investigation contract
 (pgx-core/lab_trends dedup logic in tool_agent.py, `_already_retrieved`
 dedup in retrieval.py guards it regardless if that ever changes).
+
+Retrieval Agent, round 2 (packages/agents/retrieval_2.py) sits between
+the Hypothesis Agent's first pass and the Reporter: once a leading
+hypothesis exists, it builds hypothesis-specific supporting/
+contradicting queries and reranks evidence against them via
+VultronRetriever, then the graph loops back into `hypothesis` to
+re-score with that targeted evidence before continuing to the Reporter.
+This is the "retrieves more than once when it needs to" behavior the
+Retrieval Agent's round-1 pass alone cannot provide — round 1 runs
+before any hypothesis exists, so it can only gather general evidence,
+never evidence targeted at a specific proposed explanation.
+`hypothesis_validated` gates this to run once per investigation, not
+once per Reviewer reject -> re-investigate pass (see
+InvestigationState and retrieval_2.py's module docstrings).
 """
 
 from __future__ import annotations
@@ -46,6 +60,7 @@ from packages.agents.hypothesis import hypothesis_node
 from packages.agents.planner import planner_node
 from packages.agents.reporter import reporter_node
 from packages.agents.retrieval import retrieval_node
+from packages.agents.retrieval_2 import retrieval_2_node
 from packages.agents.reviewer import reviewer_node
 from packages.agents.tool_agent import tool_agent_node
 from packages.schemas.investigation_state import InvestigationState, new_investigation
@@ -67,12 +82,25 @@ def review_router(state: InvestigationState) -> str:
     return "reinvestigate"
 
 
+def hypothesis_validation_router(state: InvestigationState) -> str:
+    """Conditional edge out of the first hypothesis pass. Routes to
+    retrieval_2 exactly once per investigation (see
+    InvestigationState.hypothesis_validated); every subsequent pass
+    through this node (i.e. every Reviewer reject -> re-investigate ->
+    hypothesis re-score) skips straight to the Reporter instead of
+    re-running the validation retrieval pass."""
+    if state.get("hypothesis_validated"):
+        return "reporter"
+    return "retrieval_2"
+
+
 def build_graph():
     graph = StateGraph(InvestigationState)
     graph.add_node("planner", planner_node)
     graph.add_node("retrieval", retrieval_node)
     graph.add_node("tool_agent", tool_agent_node)
     graph.add_node("hypothesis", hypothesis_node)
+    graph.add_node("retrieval_2", retrieval_2_node)
     graph.add_node("reporter", reporter_node)
     graph.add_node("reviewer", reviewer_node)
 
@@ -80,7 +108,22 @@ def build_graph():
     graph.add_edge("planner", "retrieval")
     graph.add_edge("retrieval", "tool_agent")
     graph.add_edge("tool_agent", "hypothesis")
-    graph.add_edge("hypothesis", "reporter")
+
+    graph.add_conditional_edges(
+        "hypothesis",
+        hypothesis_validation_router,
+        {
+            "retrieval_2": "retrieval_2",
+            "reporter": "reporter",
+        },
+    )
+    # retrieval_2 always loops back into hypothesis to re-score with the
+    # newly targeted evidence. hypothesis_validated is already True by
+    # this point (retrieval_2_node sets it before returning), so the
+    # second pass through hypothesis_validation_router above routes
+    # straight to reporter rather than back into retrieval_2 again.
+    graph.add_edge("retrieval_2", "hypothesis")
+
     graph.add_edge("reporter", "reviewer")
 
     graph.add_conditional_edges(

@@ -60,6 +60,45 @@ def _find_output(state: InvestigationState, tool_name: str) -> dict | None:
     return None
 
 
+def _validation_evidence(state: InvestigationState) -> tuple[list[str], list[str]]:
+    """Reads the targeted evidence retrieval_2.py retrieved for the
+    leading hypothesis (tagged `retrieved_for_task: "hypothesis_
+    validation"`), split by the stance VultronRetriever's query was
+    built for. Returns (supporting_snippets, contradicting_snippets) —
+    empty lists on the first hypothesis pass, since retrieval_2 hasn't
+    run yet at that point in the graph."""
+    supporting: list[str] = []
+    contradicting: list[str] = []
+    for item in state.get("retrieved_evidence", []):
+        if item.get("retrieved_for_task") != "hypothesis_validation":
+            continue
+        content = item.get("content")
+        if not content:
+            continue
+        if item.get("validation_stance") == "supporting":
+            supporting.append(str(content))
+        elif item.get("validation_stance") == "contradicting":
+            contradicting.append(str(content))
+    return supporting, contradicting
+
+
+def _describe_validation_evidence(state: InvestigationState) -> str:
+    supporting, contradicting = _validation_evidence(state)
+    if not supporting and not contradicting:
+        return ""
+    lines = [
+        "\nTargeted evidence retrieved by VultronRetriever for the "
+        "leading hypothesis from the previous round (weigh this "
+        "explicitly when re-scoring — do not just repeat your prior "
+        "confidence):"
+    ]
+    for s in supporting:
+        lines.append(f"- SUPPORTING: {s}")
+    for c in contradicting:
+        lines.append(f"- CONTRADICTING: {c}")
+    return "\n".join(lines)
+
+
 class Hypothesis(BaseModel):
     title: str = Field(description="Short title of the hypothesis")
     confidence: float = Field(description="Confidence score 0.0 to 1.0")
@@ -161,13 +200,34 @@ def _rule_based_hypothesis(state: InvestigationState) -> dict:
             alt_confidence = 0.06
             renal_confidence = 0.03
 
+        # retrieval_2.py's targeted VultronRetriever pass, when present
+        # (round 2 of the same investigation) — same "corroboration
+        # raises confidence, contradiction lowers it" rule applied to
+        # evidence this fallback wouldn't otherwise see, since it only
+        # reads tool_outputs by default. Deliberately small, capped
+        # adjustments (+/-3% per item, capped at 2 items each way) so a
+        # handful of loosely-relevant reranked passages can't swing the
+        # score as much as an actual confirmatory tool result.
+        validation_supporting, validation_contradicting = _validation_evidence(state)
+        contradicting_evidence: list[str] = []
+        if validation_supporting:
+            top_evidence.append(
+                f"VultronRetriever (round 2, supporting): {validation_supporting[0]}"
+            )
+            top_confidence = min(0.97, top_confidence + 0.03 * min(len(validation_supporting), 2))
+        if validation_contradicting:
+            contradicting_evidence.append(
+                f"VultronRetriever (round 2, contradicting): {validation_contradicting[0]}"
+            )
+            top_confidence = max(0.10, top_confidence - 0.03 * min(len(validation_contradicting), 2))
+
         hypotheses = [
             {
                 "title": "DPYD-mediated fluorouracil toxicity",
                 "confidence": top_confidence,
                 "status": "confirmed",
                 "supporting_evidence": top_evidence,
-                "contradicting_evidence": [],
+                "contradicting_evidence": contradicting_evidence,
                 "blockers": [],
             },
             {
@@ -312,11 +372,13 @@ def _violates_guardrail(state: InvestigationState, hypotheses: list[dict]) -> bo
 
 
 def _llm_hypothesis(state: InvestigationState) -> dict:
+    validation_context = _describe_validation_evidence(state)
     result = llm_json_call(
         system_prompt=_HYPOTHESIS_SYSTEM,
         user_prompt=(
             f"Incident: {state['incident']}\n\n"
             f"Tool outputs so far:\n{_describe_tool_outputs(state)}"
+            f"{validation_context}"
         ),
         output_model=HypothesisSet,
     )
@@ -347,6 +409,17 @@ def hypothesis_node(state: InvestigationState) -> dict:
     produces a variable-length list. Tagging by round lets
     reporter.py._latest_hypotheses() filter reliably regardless of how
     many hypotheses either implementation returns.
+
+    Also tagged with `validation_pass`: 0 the first time this node runs
+    within a given `retry_count` round, 1 if it's being re-invoked by
+    retrieval_2.py's loop-back edge (graph.py: hypothesis -> retrieval_2
+    -> hypothesis) after targeted VultronRetriever evidence was
+    retrieved for the leading hypothesis. `round` alone is NOT enough to
+    disambiguate these two calls — retrieval_2 runs within the same
+    Reviewer retry pass, not a new one, so both calls share the same
+    `retry_count`. Callers that need "the truly latest hypothesis set"
+    (retrieval_2.py's own `_top_hypothesis`, reporter.py's
+    `_latest_hypotheses`) must filter on both fields, not `round` alone.
     """
     if not llm_available():
         result = _rule_based_hypothesis(state)
@@ -354,6 +427,8 @@ def hypothesis_node(state: InvestigationState) -> dict:
         result = _llm_hypothesis(state)
 
     round_index = state.get("retry_count", 0)
+    validation_pass = 1 if state.get("hypothesis_validated") else 0
     for h in result.get("hypotheses", []):
         h["round"] = round_index
+        h["validation_pass"] = validation_pass
     return result
