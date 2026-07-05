@@ -52,6 +52,52 @@ function wsUrlFor(caseId: string): string {
   return `${base}/api/investigations/${caseId}/stream`;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// POST returns 202 before the background task's first save on older
+// backends; retry on 4404 until the case record exists.
+function connectInvestigationStream(caseId: string, maxAttempts = 20): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    let attempt = 0;
+
+    const tryConnect = () => {
+      const ws = new WebSocket(wsUrlFor(caseId));
+      let settled = false;
+
+      ws.onopen = () => {
+        if (settled) return;
+        settled = true;
+        resolve(ws);
+      };
+
+      ws.onclose = (event) => {
+        if (settled) return;
+        if (event.code === 4404 && attempt < maxAttempts - 1) {
+          attempt += 1;
+          void sleep(50 * attempt).then(tryConnect);
+          return;
+        }
+        settled = true;
+        reject(
+          new Error(
+            event.code === 4404
+              ? "Could not subscribe to investigation stream — case not found on server."
+              : `WebSocket closed unexpectedly (code ${event.code}).`
+          )
+        );
+      };
+
+      ws.onerror = () => {
+        // onclose handles rejection/retry.
+      };
+    };
+
+    tryConnect();
+  });
+}
+
 function newCaseId(caseType: CaseType): string {
   const suffix = Date.now().toString(36);
   return `demo-case-${caseType.toLowerCase()}-${suffix}`;
@@ -157,12 +203,14 @@ export default function Dashboard() {
           throw new Error(`Failed to start investigation (${res.status}): ${detail}`);
         }
 
-        const ws = new WebSocket(wsUrlFor(caseId));
+        const ws = await connectInvestigationStream(caseId);
         wsRef.current = ws;
+        let doneReceived = false;
 
         ws.onmessage = (event) => {
           const data: StreamMessage = JSON.parse(event.data);
           if (data.done) {
+            doneReceived = true;
             applyFinalState(data.state);
             setInvestigating(false);
             return;
@@ -171,12 +219,17 @@ export default function Dashboard() {
         };
 
         ws.onerror = () => {
-          setError("WebSocket connection error — is the API running at " + API_BASE + "?");
-          setInvestigating(false);
+          if (!doneReceived) {
+            setError("WebSocket connection error — is the API running at " + API_BASE + "?");
+            setInvestigating(false);
+          }
         };
 
         ws.onclose = () => {
-          setInvestigating(false);
+          if (!doneReceived) {
+            setError("Connection closed before the investigation finished.");
+            setInvestigating(false);
+          }
         };
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to start investigation.");

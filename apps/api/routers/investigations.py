@@ -65,9 +65,19 @@ def _execute_investigation(
     to apps/api/events.py so any connected WebSocket client sees it
     live. Persists a final snapshot even if the graph raises partway
     through (best-effort — an investigation that crashed mid-run should
-    still be inspectable, not silently vanish)."""
-    last_state: dict = new_investigation(case_id=case_id, incident=incident)
-    save_investigation(dict(last_state))
+    still be inspectable, not silently vanish).
+
+    The POST handler persists an initial placeholder state before
+    scheduling this task so WebSocket clients can subscribe immediately;
+    load that snapshot here rather than overwriting it."""
+    existing = load_investigation(case_id)
+    if existing is not None:
+        last_state = dict(existing)
+    else:
+        last_state = new_investigation(case_id=case_id, incident=incident)
+        if retrieved_evidence:
+            last_state["retrieved_evidence"] = list(retrieved_evidence)
+        save_investigation(dict(last_state))
 
     try:
         for node_name, state_update in run_investigation(
@@ -95,6 +105,14 @@ def create_investigation(
         raise HTTPException(
             status_code=409, detail=f"Investigation '{request.case_id}' already exists."
         )
+
+    # Persist a placeholder immediately so a WebSocket client that
+    # connects right after this 202 response does not race the
+    # BackgroundTask's first save and get closed with 4404.
+    initial_state = new_investigation(case_id=request.case_id, incident=request.incident)
+    if request.retrieved_evidence:
+        initial_state["retrieved_evidence"] = list(request.retrieved_evidence)
+    save_investigation(dict(initial_state))
 
     background_tasks.add_task(
         _execute_investigation, request.case_id, request.incident, request.retrieved_evidence
